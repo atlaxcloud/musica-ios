@@ -88,12 +88,11 @@ struct TrackRow: View {
                     Image(systemName: player.playing ? "speaker.wave.2.fill" : "speaker.fill")
                         .font(.system(size: 12)).foregroundColor(Brand.fg)
                 }
-                if store.downloading == track.id {
-                    ProgressView().controlSize(.small)
-                } else if store.isDownloaded(track.id) {
-                    Image(systemName: "arrow.down.circle.fill").font(.system(size: 13)).foregroundColor(Brand.dim)
-                } else if store.pending.contains(track.id) {
-                    Image(systemName: "clock").font(.system(size: 12)).foregroundColor(Brand.faint)
+                // On the phone is the norm: no mark. Only what is not here yet says so, small.
+                if store.inFlight.contains(track.id) {
+                    ProgressView().controlSize(.mini)
+                } else if !store.isDownloaded(track.id) {
+                    Image(systemName: "icloud").font(.system(size: 11)).foregroundColor(Brand.faint)
                 }
                 Text(mmss(track.duration))
                     .font(.system(size: 12).monospacedDigit())

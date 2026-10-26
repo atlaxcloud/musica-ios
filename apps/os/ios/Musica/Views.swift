@@ -48,6 +48,13 @@ struct RootView: View {
                 }
             }
             .navigationDestination(for: String.self) { PlaylistView(name: $0) }
+            // While open, the library stays current with the PC every few minutes (new songs get saved too).
+            .task {
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 300_000_000_000)
+                    if phase == .active { await store.refresh() }
+                }
+            }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 if player.current != nil { MiniPlayer() }
             }
@@ -79,10 +86,8 @@ struct Banner: View {
                 }
                 .padding(12)
                 .background(RoundedRectangle(cornerRadius: Brand.r.tile, style: .continuous).fill(Brand.surface))
-            } else if !store.online {
-                line("wifi.slash", "Offline · suonano i brani scaricati")
-            } else if !store.pcOn && store.syncedAt != nil {
-                line("desktopcomputer", "PC spento · suonano i brani scaricati")
+            } else {
+                Status()
             }
             if let n = store.note { line("info.circle", n) }
             if let m = player.message { line("exclamationmark.circle", m) }
@@ -100,6 +105,42 @@ struct Banner: View {
         .foregroundColor(Brand.dim)
         .padding(.horizontal, 12).padding(.vertical, 8)
         .background(RoundedRectangle(cornerRadius: Brand.r.small, style: .continuous).fill(Brand.surface))
+    }
+}
+
+/// One quiet line under the tabs: is the phone self-sufficient, is it filling up, is it offline.
+/// No box, no colour: it only says what changes what you can play.
+struct Status: View {
+    @EnvironmentObject private var store: MusicStore
+
+    var body: some View {
+        let all = store.tracks.filter(\.supported).count
+        let have = store.downloadedTracks.count
+        let busy = !store.inFlight.isEmpty || !store.pending.isEmpty
+        VStack(spacing: 4) {
+            HStack(spacing: 6) {
+                Circle().fill(store.online ? Brand.fg.opacity(have >= all ? 0.9 : 0.5) : Brand.faint).frame(width: 6, height: 6)
+                Text(text(all: all, have: have, busy: busy))
+                    .font(.system(size: 12).monospacedDigit())
+                    .foregroundColor(Brand.dim)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            if busy && store.online && all > 0 {
+                ProgressView(value: Double(have), total: Double(all))
+                    .tint(Brand.fg.opacity(0.6))
+                    .scaleEffect(x: 1, y: 0.5, anchor: .center)
+            }
+        }
+        .padding(.horizontal, 4)
+        .animation(.easeOut(duration: 0.2), value: busy)
+    }
+
+    private func text(all: Int, have: Int, busy: Bool) -> String {
+        if !store.online { return "Offline · \(have) brani sul telefono" }
+        if !store.pcOn && store.syncedAt != nil && have < all { return "PC spento · \(have) di \(all) sul telefono" }
+        if busy { return "Scarico sul telefono · \(have) di \(all)" }
+        return all == 0 ? "" : "Tutto sul telefono · \(have) brani"
     }
 }
 
@@ -148,9 +189,8 @@ struct PlaylistsView: View {
                             Text("\(p.ids.count) brani · \(have) sul telefono").font(.system(size: 12.5)).foregroundColor(Brand.dim)
                         }
                         Spacer(minLength: 8)
-                        if store.keep.contains(p.name) {
-                            Image(systemName: have == p.ids.count ? "checkmark.circle.fill" : "arrow.down.circle")
-                                .foregroundColor(Brand.dim)
+                        if have < p.ids.count {
+                            Image(systemName: "icloud").font(.system(size: 12)).foregroundColor(Brand.faint)
                         }
                     }
                 }
@@ -192,22 +232,9 @@ struct PlaylistView: View {
                     Button { player.play(ids) } label: { Label("Riproduci", systemImage: "play.fill") }.buttonStyle(Pill())
                     Button { player.play(ids, shuffled: true) } label: { Label("Casuale", systemImage: "shuffle") }.buttonStyle(Pill(filled: false))
                 }
-                Toggle(isOn: Binding(get: { store.keep.contains(name) }, set: { store.keepOffline(name, $0) })) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Tienila offline").font(.system(size: 15, weight: .semibold))
-                        Text("Scarica tutto e anche i brani che aggiungi dopo").font(.system(size: 12)).foregroundColor(Brand.dim)
-                    }
-                }
-                .toggleStyle(SwitchToggleStyle(tint: Brand.fg.opacity(0.85)))
-                if !missing.isEmpty && !store.keep.contains(name) {
-                    Button { store.download(missing) } label: { Label("Scarica \(missing.count) brani", systemImage: "arrow.down.circle") }
-                        .buttonStyle(Pill(filled: false))
-                }
-                if !ids.isEmpty && (missing.contains { store.pending.contains($0) || store.downloading == $0 }) {
-                    ProgressView(value: Double(have), total: Double(max(ids.count, 1)))
-                        .tint(Brand.fg)
-                    Text(store.online ? "Scarico… \(have) di \(ids.count)" : "In pausa: niente rete")
-                        .font(.system(size: 12)).foregroundColor(Brand.dim)
+                if !ids.isEmpty && (missing.contains { store.pending.contains($0) || store.inFlight.contains($0) }) {
+                    Text(store.online ? "Sul telefono \(have) di \(ids.count)" : "Offline · \(have) di \(ids.count) sul telefono")
+                        .font(.system(size: 12).monospacedDigit()).foregroundColor(Brand.dim)
                 }
             }
             .row()
@@ -381,7 +408,7 @@ struct DownloadsView: View {
             }
             .onDelete { offs in for o in offs { store.delete(ts[o].id) } }
             if ts.isEmpty {
-                Empty(text: "Niente sul telefono. Apri una playlist e accendi \"Tienila offline\".").row()
+                Empty(text: store.online ? "Scarico la libreria sul telefono…" : "Niente sul telefono: si scarica appena c'è rete.").row()
             } else {
                 Button(role: .destructive) { confirm = true } label: { Text("Elimina tutti") }.buttonStyle(Pill(filled: false)).row()
             }

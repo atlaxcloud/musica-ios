@@ -286,6 +286,7 @@ final class MusicPlayer: ObservableObject {
     private func makeItem(_ t: Track) -> AVPlayerItem? {
         if let f = store.file(t.id) { return AVPlayerItem(url: f) }
         guard store.playable(t) else { return nil }
+        store.prioritize(t.id)  // streams now, and is the next file saved on the phone
         let asset = AVURLAsset(url: MusicAPI.fileURL(t.rel), options: [AVURLAssetHTTPCookiesKey: Auth.cookies])
         return AVPlayerItem(asset: asset)
     }

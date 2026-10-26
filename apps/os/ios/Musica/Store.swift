@@ -76,15 +76,19 @@ final class MusicStore: ObservableObject {
     @Published private(set) var loading = false
     @Published private(set) var needsLogin = false
     @Published private(set) var note: String?
-    /// Download queue (ids), the one in flight, and the batch's progress.
+    /// Download queue (ids), the ones in flight, and the batch's progress.
+    /// The whole library is always kept on the phone: every refresh queues what is missing.
     @Published private(set) var pending: [String] = []
-    @Published private(set) var downloading: String?
+    @Published private(set) var inFlight: Set<String> = []
+    var downloading: String? { inFlight.first }
     @Published private(set) var done = 0
     @Published private(set) var total = 0
     @Published private(set) var adding: Set<String> = []
 
     private var byId: [String: Track] = [:]
     private var pumping = false
+    /// Files fetched at once: the PC bridge is slow per file, not per byte.
+    private let workers = 3
     private let monitor = NWPathMonitor()
 
     init() {
@@ -167,7 +171,7 @@ final class MusicStore: ObservableObject {
             apply(try await MusicAPI.json(MusicAPI.request("/api/musica")))
             needsLogin = false
             note = nil
-            syncKept()
+            downloadAll()
             Task { await prefetchCovers() }
         } catch MusicError.auth {
             needsLogin = true
@@ -270,14 +274,24 @@ final class MusicStore: ObservableObject {
         if on, let p = playlist(name) { download(p.ids) }
     }
 
-    private func syncKept() {
-        for n in keep { if let p = playlist(n) { download(p.ids) } }
+    /// Everything on the phone, always: what the PC gained since the last refresh gets queued.
+    private func downloadAll() {
+        download(tracks.map(\.id))
+        pump()
+    }
+
+    /// Tapped and not on the phone yet: it goes first in the queue (it streams meanwhile).
+    func prioritize(_ id: String) {
+        guard files[id] == nil, !inFlight.contains(id), byId[id]?.supported ?? false else { return }
+        if let i = pending.firstIndex(of: id) { pending.remove(at: i) } else { total += 1 }
+        pending.insert(id, at: 0)
+        saveState()
         pump()
     }
 
     func download(_ ids: [String]) {
         var added = 0
-        for id in ids where files[id] == nil && !pending.contains(id) && downloading != id && (byId[id]?.supported ?? false) {
+        for id in ids where files[id] == nil && !pending.contains(id) && !inFlight.contains(id) && (byId[id]?.supported ?? false) {
             pending.append(id)
             added += 1
         }
@@ -310,31 +324,39 @@ final class MusicStore: ObservableObject {
         defer {
             if bg != .invalid { UIApplication.shared.endBackgroundTask(bg) }
             pumping = false
-            downloading = nil
+            inFlight = []
             if pending.isEmpty { done = 0; total = 0 }
             saveState()
         }
         if total < pending.count + done { total = pending.count + done }
-        while let id = pending.first, online {
-            guard let t = byId[id], files[id] == nil else { pending.removeFirst(); continue }
-            downloading = id
+        await withTaskGroup(of: Void.self) { g in
+            for _ in 0..<workers { g.addTask { await MusicStore.shared.worker() } }
+        }
+    }
+
+    /// One lane of the queue: takes the next id (the head, so a tapped track goes first)
+    /// until the queue is empty or a stop (no network, PC off, signed out) clears it.
+    private func worker() async {
+        while online, let id = pending.first(where: { !inFlight.contains($0) }) {
+            guard let t = byId[id], files[id] == nil else { pending.removeAll { $0 == id }; continue }
+            inFlight.insert(id)
+            defer { inFlight.remove(id) }
             do {
                 try await fetch(t)
-                pending.removeFirst()
+                pending.removeAll { $0 == id }
                 done += 1
+                note = nil
                 saveState()
             } catch MusicError.auth {
                 needsLogin = true
                 return
             } catch MusicError.http(let c) where c == 404 || c == 400 || c == 415 {
-                pending.removeFirst()
+                pending.removeAll { $0 == id }
                 done += 1
             } catch MusicError.pcOff {
                 pcOn = false
-                note = "Il PC con la musica è spento: i download riprendono quando torna"
                 return
             } catch {
-                note = "Download interrotto: riprende con la rete"
                 return
             }
         }
