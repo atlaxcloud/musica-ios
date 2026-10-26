@@ -59,49 +59,147 @@ struct Press: ButtonStyle {
     }
 }
 
-/// One track in any list. Tap plays; long press opens the menu.
+/// One track in any list. Tap plays; the ⋯ (or a long press) opens its menu.
 struct TrackRow: View {
     @EnvironmentObject private var store: MusicStore
     @EnvironmentObject private var player: MusicPlayer
     let track: Track
     var playlist: String? = nil
+    /// Position in a playlist: shown instead of the cover's left edge, like an album.
+    var number: Int? = nil
     let onTap: () -> Void
 
     var body: some View {
         let now = player.current?.id == track.id
         let ok = store.playable(track)
-        Button(action: { Haptic.tap(); onTap() }) {
-            HStack(spacing: 12) {
-                CoverView(track: track)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(track.title)
-                        .font(.system(size: 15, weight: now ? .semibold : .regular))
-                        .foregroundColor(ok ? Brand.fg : Brand.faint)
-                        .lineLimit(1)
-                    Text(track.subtitle.isEmpty ? " " : track.subtitle)
-                        .font(.system(size: 12.5))
+        HStack(spacing: 12) {
+            Button(action: { Haptic.tap(); onTap() }) {
+                HStack(spacing: 12) {
+                    ZStack {
+                        CoverView(track: track, size: 48, radius: 8)
+                        if now {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.black.opacity(0.45))
+                            Bars(on: player.playing).frame(width: 16, height: 14)
+                        }
+                    }
+                    .frame(width: 48, height: 48)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(track.title)
+                            .font(.system(size: 15.5, weight: now ? .semibold : .medium))
+                            .foregroundColor(ok ? Brand.fg : Brand.faint)
+                            .lineLimit(1)
+                        HStack(spacing: 5) {
+                            // On the phone is the norm: no mark. Only what is not here yet says so, small.
+                            if store.inFlight.contains(track.id) {
+                                ProgressView().controlSize(.mini).scaleEffect(0.8).frame(width: 11, height: 11)
+                            } else if !store.isDownloaded(track.id) {
+                                Image(systemName: "icloud").font(.system(size: 10, weight: .semibold))
+                            }
+                            Text(track.artist.isEmpty ? mmss(track.duration) : track.artist).lineLimit(1)
+                        }
+                        .font(.system(size: 13))
                         .foregroundColor(Brand.dim)
-                        .lineLimit(1)
+                    }
+                    Spacer(minLength: 4)
                 }
-                Spacer(minLength: 8)
-                if now {
-                    Image(systemName: player.playing ? "speaker.wave.2.fill" : "speaker.fill")
-                        .font(.system(size: 12)).foregroundColor(Brand.fg)
-                }
-                // On the phone is the norm: no mark. Only what is not here yet says so, small.
-                if store.inFlight.contains(track.id) {
-                    ProgressView().controlSize(.mini)
-                } else if !store.isDownloaded(track.id) {
-                    Image(systemName: "icloud").font(.system(size: 11)).foregroundColor(Brand.faint)
-                }
-                Text(mmss(track.duration))
-                    .font(.system(size: 12).monospacedDigit())
-                    .foregroundColor(Brand.faint)
+                .contentShape(Rectangle())
             }
-            .contentShape(Rectangle())
+            .buttonStyle(.plain)
+            Menu { TrackMenu(track: track, playlist: playlist) } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(Brand.faint)
+                    .frame(width: 32, height: 44)
+                    .contentShape(Rectangle())
+            }
         }
-        .buttonStyle(.plain)
+        .padding(.vertical, 5)
         .contextMenu { TrackMenu(track: track, playlist: playlist) }
+    }
+}
+
+/// The three bouncing bars on the track that is playing (still when paused).
+struct Bars: View {
+    let on: Bool
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1 / 30, paused: !on)) { tl in
+            let t = tl.date.timeIntervalSinceReferenceDate
+            HStack(alignment: .bottom, spacing: 2.5) {
+                ForEach(0..<3) { i in
+                    let h = on ? 0.35 + 0.65 * abs(sin(t * (5.2 + Double(i) * 1.7) + Double(i))) : 0.35
+                    Capsule().fill(Brand.fg).frame(width: 3.5).frame(height: 14 * h)
+                }
+            }
+            .frame(height: 14, alignment: .bottom)
+        }
+    }
+}
+
+/// A playlist's face: its first four covers in a square, or the first one alone.
+struct Mosaic: View {
+    @EnvironmentObject private var store: MusicStore
+    let ids: [String]
+    var radius: CGFloat = Brand.r.tile
+
+    var body: some View {
+        GeometryReader { g in
+            let ts = ids.prefix(12).compactMap { store.track($0) }.filter { !$0.cover.isEmpty }
+            let four = Array(ts.prefix(4))
+            ZStack {
+                Rectangle().fill(Brand.raised)
+                if four.count == 4 {
+                    let h = g.size.width / 2
+                    VStack(spacing: 0) {
+                        HStack(spacing: 0) { tile(four[0], h); tile(four[1], h) }
+                        HStack(spacing: 0) { tile(four[2], h); tile(four[3], h) }
+                    }
+                } else if let t = ts.first {
+                    CoverView(track: t, size: g.size.width, radius: 0)
+                } else {
+                    Image(systemName: "music.note.list").font(.system(size: g.size.width * 0.28, weight: .medium)).foregroundColor(Brand.faint)
+                }
+            }
+            .frame(width: g.size.width, height: g.size.width)
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+    }
+
+    private func tile(_ t: Track, _ side: CGFloat) -> some View {
+        CoverView(track: t, size: side, radius: 0)
+    }
+}
+
+/// The cover blown up and blurred, fading to black: the colour of the song behind a screen.
+struct Backdrop: View {
+    let track: Track?
+    var fade = true
+    @State private var img: UIImage?
+
+    var body: some View {
+        ZStack {
+            Brand.bg
+            if let img = img {
+                Image(uiImage: img).resizable().scaledToFill()
+                    .blur(radius: 70, opaque: true)
+                    .saturation(1.4)
+                    .opacity(0.75)
+                    .transition(.opacity)
+            }
+            if fade {
+                LinearGradient(colors: [.black.opacity(0.15), .black.opacity(0.55), .black], startPoint: .top, endPoint: .bottom)
+            } else {
+                Color.black.opacity(0.42)
+            }
+        }
+        .clipped()
+        .allowsHitTesting(false)
+        .animation(.easeOut(duration: 0.5), value: img)
+        .task(id: track?.id) {
+            guard let t = track else { img = nil; return }
+            img = Covers.shared.cached(t)
+            if img == nil { img = await Covers.shared.load(t) }
+        }
     }
 }
 

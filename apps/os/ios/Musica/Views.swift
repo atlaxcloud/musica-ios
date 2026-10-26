@@ -1,63 +1,50 @@
-// Musica: the screens. Libreria, Playlist, Cerca, Scaricati under one header,
-// the mini player docked at the bottom, the full player over everything.
+// Musica: the screens. Three tabs (Ascolta, Playlist, Cerca) in a bar of our own,
+// the mini player floating above it, the full player over everything.
 import SwiftUI
 
 enum Pane: String, CaseIterable, Identifiable {
-    case library = "Libreria", playlists = "Playlist", search = "Cerca", downloads = "Scaricati"
+    case home = "Ascolta", playlists = "Playlist", search = "Cerca"
     var id: String { rawValue }
+    var icon: String {
+        switch self {
+        case .home: return "play.circle"
+        case .playlists: return "square.stack"
+        case .search: return "magnifyingglass"
+        }
+    }
+    var iconOn: String {
+        switch self {
+        case .home: return "play.circle.fill"
+        case .playlists: return "square.stack.fill"
+        case .search: return "magnifyingglass"
+        }
+    }
 }
 
 struct RootView: View {
     @EnvironmentObject private var store: MusicStore
     @EnvironmentObject private var player: MusicPlayer
     @Environment(\.scenePhase) private var phase
-    @AppStorage("musica.pane") private var pane = Pane.library.rawValue
+    @AppStorage("musica.tab") private var tab = Pane.home.rawValue
     @State private var login = false
 
     var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                Picker("", selection: $pane) {
-                    ForEach(Pane.allCases) { Text($0.rawValue).tag($0.rawValue) }
-                }
-                .pickerStyle(.segmented)
-                .padding(.horizontal, 16)
-                .padding(.bottom, 8)
-                Banner(login: $login)
-                switch Pane(rawValue: pane) ?? .library {
-                case .library: LibraryView()
-                case .playlists: PlaylistsView()
-                case .search: SearchView()
-                case .downloads: DownloadsView()
-                }
+        let pane = Pane(rawValue: tab) ?? .home
+        ZStack {
+            Brand.bg.ignoresSafeArea()
+            // Every tab keeps its own stack (and its scroll) while you switch.
+            ForEach(Pane.allCases) { p in
+                NavigationStack { screen(p) }
+                    .opacity(p == pane ? 1 : 0)
+                    .allowsHitTesting(p == pane)
             }
-            .background(Brand.bg.ignoresSafeArea())
-            .navigationTitle("Musica")
-            .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
-                    Menu {
-                        Button { Task { await store.refresh() } } label: { Label("Aggiorna", systemImage: "arrow.clockwise") }
-                        if store.needsLogin {
-                            Button { login = true } label: { Label("Accedi", systemImage: "person.crop.circle") }
-                        } else {
-                            Button(role: .destructive) { store.signOut() } label: { Label("Esci", systemImage: "rectangle.portrait.and.arrow.right") }
-                        }
-                    } label: {
-                        Image(systemName: store.loading ? "arrow.triangle.2.circlepath" : "ellipsis.circle")
-                    }
-                }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 6) {
+                if player.current != nil { MiniPlayer().transition(.move(edge: .bottom).combined(with: .opacity)) }
+                TabBar(tab: $tab)
             }
-            .navigationDestination(for: String.self) { PlaylistView(name: $0) }
-            // While open, the library stays current with the PC every few minutes (new songs get saved too).
-            .task {
-                while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: 300_000_000_000)
-                    if phase == .active { await store.refresh() }
-                }
-            }
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if player.current != nil { MiniPlayer() }
-            }
+            .animation(.spring(response: 0.35, dampingFraction: 0.86), value: player.current?.id)
         }
         .fullScreenCover(isPresented: $player.full) { FullPlayer() }
         .sheet(isPresented: $login) { LoginSheet() }
@@ -67,49 +54,153 @@ struct RootView: View {
             if p == .active { Task { await store.refresh() }; store.pump() }
             if p == .background { player.save(force: true) }
         }
+        // While open, the library stays current with the PC every few minutes (new songs get saved too).
+        .task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 300_000_000_000)
+                if phase == .active { await store.refresh() }
+            }
+        }
+    }
+
+    @ViewBuilder private func screen(_ p: Pane) -> some View {
+        switch p {
+        case .home: HomeView(login: $login)
+        case .playlists: PlaylistsView()
+        case .search: SearchView()
+        }
     }
 }
 
-/// One line on where we stand: offline, PC off, signed out, a note from the server.
+/// The bottom bar: three icons with their names, on glass, the selected one white.
+struct TabBar: View {
+    @Binding var tab: String
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(Pane.allCases) { p in
+                let on = tab == p.rawValue
+                Button {
+                    if !on { Haptic.tap() }
+                    tab = p.rawValue
+                } label: {
+                    VStack(spacing: 3) {
+                        Image(systemName: on ? p.iconOn : p.icon).font(.system(size: 20, weight: on ? .semibold : .regular))
+                        Text(p.rawValue).font(.system(size: 10.5, weight: .medium))
+                    }
+                    .foregroundColor(on ? Brand.fg : Brand.faint)
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 8)
+                    .padding(.bottom, 2)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .background(.ultraThinMaterial)
+        .background(Brand.bg.opacity(0.55))
+        .overlay(Rectangle().fill(Brand.line).frame(height: 0.5), alignment: .top)
+    }
+}
+
+// MARK: Ascolta
+
+struct HomeView: View {
+    @EnvironmentObject private var store: MusicStore
+    @EnvironmentObject private var player: MusicPlayer
+    @Binding var login: Bool
+    @State private var confirmWipe = false
+
+    var body: some View {
+        let ids = store.tracks.map(\.id)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                Banner(login: $login).padding(.horizontal, 20).padding(.bottom, 14)
+                if store.tracks.isEmpty {
+                    Empty(text: store.loading ? "Carico la libreria…" : "La libreria è vuota.\nCerca un brano per aggiungerlo.")
+                        .padding(.top, 60)
+                } else {
+                    HStack(spacing: 10) {
+                        Button { player.play(ids, shuffled: true) } label: { Label("Casuale", systemImage: "shuffle") }.buttonStyle(Pill())
+                        Button { player.play(ids) } label: { Label("Riproduci", systemImage: "play.fill") }.buttonStyle(Pill(filled: false))
+                    }
+                    .padding(.horizontal, 20)
+                    if !store.playlists.isEmpty {
+                        SectionTitle(text: "Le tue playlist").padding(.top, 28)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            LazyHStack(alignment: .top, spacing: 14) {
+                                ForEach(store.playlists) { p in
+                                    NavigationLink(value: p.name) { PlaylistCard(playlist: p, side: 150) }.buttonStyle(Press())
+                                }
+                            }
+                            .padding(.horizontal, 20)
+                        }
+                    }
+                    SectionTitle(text: "Tutti i brani", trailing: "\(store.tracks.count)").padding(.top, 28).padding(.bottom, 4)
+                    ForEach(Array(store.tracks.enumerated()), id: \.element.id) { i, t in
+                        TrackRow(track: t) { player.play(ids, from: i) }
+                            .padding(.horizontal, 20)
+                    }
+                    Footer(text: store.syncedAt.map { "Aggiornata alle " + $0.formatted(date: .omitted, time: .shortened) } ?? "")
+                        .padding(.top, 8)
+                }
+            }
+            .padding(.bottom, 24)
+        }
+        .refreshable { await store.refresh() }
+        .background(Brand.bg)
+        .navigationTitle("Musica")
+        .navigationDestination(for: String.self) { PlaylistView(name: $0) }
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Menu {
+                    Button { Task { await store.refresh() } } label: { Label("Aggiorna", systemImage: "arrow.clockwise") }
+                    Text("\(store.downloadedTracks.count) brani · \(megabytes(store.bytes)) sul telefono")
+                    Divider()
+                    if store.needsLogin {
+                        Button { login = true } label: { Label("Accedi", systemImage: "person.crop.circle") }
+                    } else {
+                        Button(role: .destructive) { confirmWipe = true } label: { Label("Libera spazio sul telefono", systemImage: "trash") }
+                        Button(role: .destructive) { store.signOut() } label: { Label("Esci", systemImage: "rectangle.portrait.and.arrow.right") }
+                    }
+                } label: {
+                    Image(systemName: store.loading ? "arrow.triangle.2.circlepath" : "ellipsis.circle")
+                        .font(.system(size: 17, weight: .medium))
+                }
+            }
+        }
+        .confirmationDialog("Togliere i brani dal telefono? Si riscaricano col prossimo aggiornamento.", isPresented: $confirmWipe, titleVisibility: .visible) {
+            Button("Togli tutti", role: .destructive) { store.deleteAll() }
+        }
+    }
+}
+
+/// Sign-in call, then the quiet status line, then a note from the server or the player.
 struct Banner: View {
     @EnvironmentObject private var store: MusicStore
     @EnvironmentObject private var player: MusicPlayer
     @Binding var login: Bool
 
     var body: some View {
-        VStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             if store.needsLogin {
                 HStack(spacing: 12) {
-                    Text("Accedi una volta con Atlax ID: poi la musica scaricata va anche senza rete.")
+                    Text("Accedi una volta con Atlax ID: poi la musica va anche senza rete.")
                         .font(.system(size: 13)).foregroundColor(Brand.dim)
                     Button("Accedi") { login = true }.buttonStyle(Pill()).frame(width: 96)
                 }
-                .padding(12)
+                .padding(14)
                 .background(RoundedRectangle(cornerRadius: Brand.r.tile, style: .continuous).fill(Brand.surface))
             } else {
                 Status()
             }
-            if let n = store.note { line("info.circle", n) }
-            if let m = player.message { line("exclamationmark.circle", m) }
+            if let n = store.note { Note(icon: "info.circle", text: n) }
+            if let m = player.message { Note(icon: "exclamationmark.circle", text: m) }
         }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 4)
-    }
-
-    private func line(_ icon: String, _ text: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: icon).font(.system(size: 12, weight: .semibold))
-            Text(text).font(.system(size: 13)).lineLimit(2)
-            Spacer(minLength: 0)
-        }
-        .foregroundColor(Brand.dim)
-        .padding(.horizontal, 12).padding(.vertical, 8)
-        .background(RoundedRectangle(cornerRadius: Brand.r.small, style: .continuous).fill(Brand.surface))
     }
 }
 
-/// One quiet line under the tabs: is the phone self-sufficient, is it filling up, is it offline.
-/// No box, no colour: it only says what changes what you can play.
+/// One quiet line: is the phone self-sufficient, is it filling up, is it offline. No box, no colour.
 struct Status: View {
     @EnvironmentObject private var store: MusicStore
 
@@ -117,89 +208,87 @@ struct Status: View {
         let all = store.tracks.filter(\.supported).count
         let have = store.downloadedTracks.count
         let busy = !store.inFlight.isEmpty || !store.pending.isEmpty
-        VStack(spacing: 4) {
-            HStack(spacing: 6) {
-                Circle().fill(store.online ? Brand.fg.opacity(have >= all ? 0.9 : 0.5) : Brand.faint).frame(width: 6, height: 6)
-                Text(text(all: all, have: have, busy: busy))
-                    .font(.system(size: 12).monospacedDigit())
-                    .foregroundColor(Brand.dim)
-                    .lineLimit(1)
-                Spacer(minLength: 0)
+        let text = line(all: all, have: have, busy: busy)
+        if !text.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: icon(all: all, have: have))
+                        .font(.system(size: 11, weight: .semibold))
+                    Text(text).font(.system(size: 12.5).monospacedDigit()).lineLimit(1)
+                }
+                .foregroundColor(Brand.dim)
+                if busy && store.online && all > 0 {
+                    Capsule().fill(Brand.raised).frame(height: 2)
+                        .overlay(GeometryReader { g in
+                            Capsule().fill(Brand.fg.opacity(0.7)).frame(width: g.size.width * CGFloat(have) / CGFloat(all))
+                        }, alignment: .leading)
+                        .frame(maxWidth: 180)
+                }
             }
-            if busy && store.online && all > 0 {
-                ProgressView(value: Double(have), total: Double(all))
-                    .tint(Brand.fg.opacity(0.6))
-                    .scaleEffect(x: 1, y: 0.5, anchor: .center)
-            }
+            .animation(.easeOut(duration: 0.25), value: busy)
         }
-        .padding(.horizontal, 4)
-        .animation(.easeOut(duration: 0.2), value: busy)
     }
 
-    private func text(all: Int, have: Int, busy: Bool) -> String {
+    private func icon(all: Int, have: Int) -> String {
+        if !store.online { return "wifi.slash" }
+        return have >= all ? "checkmark.circle.fill" : "arrow.down.circle"
+    }
+
+    private func line(all: Int, have: Int, busy: Bool) -> String {
         if !store.online { return "Offline · \(have) brani sul telefono" }
         if !store.pcOn && store.syncedAt != nil && have < all { return "PC spento · \(have) di \(all) sul telefono" }
         if busy { return "Scarico sul telefono · \(have) di \(all)" }
-        return all == 0 ? "" : "Tutto sul telefono · \(have) brani"
+        return all == 0 ? "" : "Tutto sul telefono"
     }
 }
 
-struct LibraryView: View {
-    @EnvironmentObject private var store: MusicStore
-    @EnvironmentObject private var player: MusicPlayer
-
+struct Note: View {
+    let icon: String
+    let text: String
     var body: some View {
-        let ids = store.tracks.map(\.id)
-        List {
-            if store.tracks.isEmpty {
-                Empty(text: store.loading ? "Carico la libreria…" : "La libreria è vuota. Cerca un brano per aggiungerlo.").row()
-            } else {
-                HStack(spacing: 10) {
-                    Button { player.play(ids) } label: { Label("Riproduci", systemImage: "play.fill") }.buttonStyle(Pill())
-                    Button { player.play(ids, shuffled: true) } label: { Label("Casuale", systemImage: "shuffle") }.buttonStyle(Pill(filled: false))
-                }
-                .row()
-                ForEach(Array(store.tracks.enumerated()), id: \.element.id) { i, t in
-                    TrackRow(track: t) { player.play(ids, from: i) }.row()
-                }
-                Footer(text: "\(store.tracks.count) brani" + (store.syncedAt.map { " · aggiornata alle " + $0.formatted(date: .omitted, time: .shortened) } ?? "")).row()
-            }
+        HStack(spacing: 8) {
+            Image(systemName: icon).font(.system(size: 12, weight: .semibold))
+            Text(text).font(.system(size: 13)).lineLimit(2)
+            Spacer(minLength: 0)
         }
-        .page()
-        .refreshable { await store.refresh() }
+        .foregroundColor(Brand.dim)
+        .padding(.horizontal, 12).padding(.vertical, 9)
+        .background(RoundedRectangle(cornerRadius: Brand.r.small, style: .continuous).fill(Brand.surface))
     }
 }
+
+// MARK: Playlist
 
 struct PlaylistsView: View {
     @EnvironmentObject private var store: MusicStore
     @State private var naming = false
     @State private var name = ""
+    private let cols = [GridItem(.flexible(), spacing: 16), GridItem(.flexible(), spacing: 16)]
 
     var body: some View {
-        List {
-            Button { name = ""; naming = true } label: { Label("Nuova playlist", systemImage: "plus") }
-                .buttonStyle(Pill(filled: false)).row()
-            ForEach(store.playlists) { p in
-                let have = p.ids.filter { store.isDownloaded($0) }.count
-                NavigationLink(value: p.name) {
-                    HStack(spacing: 12) {
-                        CoverView(track: p.ids.first.flatMap { store.track($0) }, size: 52, radius: Brand.r.tile)
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(p.name).font(.system(size: 16, weight: .semibold)).foregroundColor(Brand.fg).lineLimit(1)
-                            Text("\(p.ids.count) brani · \(have) sul telefono").font(.system(size: 12.5)).foregroundColor(Brand.dim)
-                        }
-                        Spacer(minLength: 8)
-                        if have < p.ids.count {
-                            Image(systemName: "icloud").font(.system(size: 12)).foregroundColor(Brand.faint)
-                        }
+        ScrollView {
+            if store.playlists.isEmpty {
+                Empty(text: "Nessuna playlist.").padding(.top, 80)
+            } else {
+                LazyVGrid(columns: cols, alignment: .leading, spacing: 22) {
+                    ForEach(store.playlists) { p in
+                        NavigationLink(value: p.name) { PlaylistCard(playlist: p, side: nil) }.buttonStyle(Press())
                     }
                 }
-                .row()
+                .padding(.horizontal, 20)
+                .padding(.top, 6)
+                .padding(.bottom, 24)
             }
-            if store.playlists.isEmpty { Empty(text: "Nessuna playlist.").row() }
         }
-        .page()
         .refreshable { await store.refresh() }
+        .background(Brand.bg)
+        .navigationTitle("Playlist")
+        .navigationDestination(for: String.self) { PlaylistView(name: $0) }
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button { name = ""; naming = true } label: { Image(systemName: "plus").font(.system(size: 17, weight: .semibold)) }
+            }
+        }
         .alert("Nuova playlist", isPresented: $naming) {
             TextField("Nome", text: $name)
             Button("Annulla", role: .cancel) {}
@@ -211,35 +300,68 @@ struct PlaylistsView: View {
     }
 }
 
+/// A playlist as a square of its covers, its name and how many songs.
+struct PlaylistCard: View {
+    @EnvironmentObject private var store: MusicStore
+    let playlist: Playlist
+    /// Fixed side (carousel) or the grid cell's width.
+    let side: CGFloat?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Group {
+                if let s = side {
+                    Mosaic(ids: playlist.ids, radius: Brand.r.tile).frame(width: s, height: s)
+                } else {
+                    Mosaic(ids: playlist.ids, radius: Brand.r.tile).aspectRatio(1, contentMode: .fit)
+                }
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(playlist.name).font(.system(size: 15, weight: .semibold)).foregroundColor(Brand.fg).lineLimit(1)
+                Text("\(playlist.ids.count) brani").font(.system(size: 12.5)).foregroundColor(Brand.dim)
+            }
+        }
+        .frame(width: side)
+    }
+}
+
 struct PlaylistView: View {
     @EnvironmentObject private var store: MusicStore
     @EnvironmentObject private var player: MusicPlayer
     @Environment(\.dismiss) private var dismiss
     let name: String
     @State private var confirmDelete = false
+    @State private var editing = false
 
     var body: some View {
         let p = store.playlist(name) ?? Playlist(name: name, ids: [])
         let ts = store.tracks(of: p)
         let ids = ts.map(\.id)
-        let have = ids.filter { store.isDownloaded($0) }.count
-        let missing = ts.filter { !store.isDownloaded($0.id) && $0.supported }.map(\.id)
+        let minutes = Int(ts.reduce(0) { $0 + $1.duration } / 60)
         List {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("\(ts.count) brani · \(mmss(ts.reduce(0) { $0 + $1.duration })) · \(have) sul telefono")
-                    .font(.system(size: 13)).foregroundColor(Brand.dim)
+            VStack(spacing: 18) {
+                Mosaic(ids: p.ids, radius: Brand.r.card)
+                    .frame(width: 236, height: 236)
+                    .shadow(color: .black.opacity(0.55), radius: 26, y: 14)
+                VStack(spacing: 4) {
+                    Text(name).font(.system(size: 26, weight: .bold)).multilineTextAlignment(.center).lineLimit(2)
+                    Text("\(ts.count) brani · \(minutes >= 60 ? "\(minutes / 60) h \(minutes % 60) min" : "\(minutes) min")")
+                        .font(.system(size: 13).monospacedDigit()).foregroundColor(Brand.dim)
+                }
                 HStack(spacing: 10) {
                     Button { player.play(ids) } label: { Label("Riproduci", systemImage: "play.fill") }.buttonStyle(Pill())
                     Button { player.play(ids, shuffled: true) } label: { Label("Casuale", systemImage: "shuffle") }.buttonStyle(Pill(filled: false))
                 }
-                if !ids.isEmpty && (missing.contains { store.pending.contains($0) || store.inFlight.contains($0) }) {
-                    Text(store.online ? "Sul telefono \(have) di \(ids.count)" : "Offline · \(have) di \(ids.count) sul telefono")
-                        .font(.system(size: 12).monospacedDigit()).foregroundColor(Brand.dim)
-                }
             }
-            .row()
+            .frame(maxWidth: .infinity)
+            .padding(.top, 4)
+            .padding(.bottom, 10)
+            .background(alignment: .top) { Backdrop(track: ts.first).frame(height: 420).offset(y: -160) }
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+            .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
             ForEach(Array(ts.enumerated()), id: \.element.id) { i, t in
-                TrackRow(track: t, playlist: name) { player.play(ids, from: i) }.row()
+                TrackRow(track: t, playlist: name, number: i + 1) { player.play(ids, from: i) }.row()
             }
             .onDelete { offs in for o in offs { store.removeFrom(name, ts[o].id) } }
             .onMove { from, to in
@@ -250,14 +372,15 @@ struct PlaylistView: View {
             if ts.isEmpty { Empty(text: "Vuota. Tieni premuto un brano → Aggiungi a playlist.").row() }
         }
         .page()
-        .navigationTitle(name)
-        .navigationBarTitleDisplayMode(.large)
+        .environment(\.editMode, .constant(editing ? .active : .inactive))
+        .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItemGroup(placement: .navigationBarTrailing) {
-                EditButton()
+            ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
+                    Button { withAnimation { editing.toggle() } } label: { Label(editing ? "Fine" : "Riordina", systemImage: "arrow.up.arrow.down") }
                     Button(role: .destructive) { confirmDelete = true } label: { Label("Elimina playlist", systemImage: "trash") }
-                } label: { Image(systemName: "ellipsis.circle") }
+                } label: { Image(systemName: editing ? "checkmark.circle.fill" : "ellipsis.circle").font(.system(size: 17, weight: .medium)) }
             }
         }
         .confirmationDialog("Eliminare \(name)?", isPresented: $confirmDelete, titleVisibility: .visible) {
@@ -265,6 +388,8 @@ struct PlaylistView: View {
         }
     }
 }
+
+// MARK: Cerca
 
 struct SearchView: View {
     @EnvironmentObject private var store: MusicStore
@@ -281,44 +406,56 @@ struct SearchView: View {
             $0.title.localizedCaseInsensitiveContains(needle) || $0.artist.localizedCaseInsensitiveContains(needle) || $0.album.localizedCaseInsensitiveContains(needle)
         }
         let ids = local.map(\.id)
-        List {
-            HStack(spacing: 8) {
-                Image(systemName: "magnifyingglass").foregroundColor(Brand.faint)
-                TextField("Brano, artista, album", text: $q)
-                    .focused($focused)
-                    .submitLabel(.search)
-                    .autocorrectionDisabled()
-                    .onSubmit { remote() }
-                if !q.isEmpty {
-                    Button { q = ""; found = [] } label: { Image(systemName: "xmark.circle.fill").foregroundColor(Brand.faint) }.buttonStyle(.plain)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                HStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass").foregroundColor(Brand.faint)
+                    TextField("Brani, artisti, YouTube", text: $q)
+                        .focused($focused)
+                        .submitLabel(.search)
+                        .autocorrectionDisabled()
+                        .onSubmit { remote() }
+                    if !q.isEmpty {
+                        Button { q = ""; found = [] } label: { Image(systemName: "xmark.circle.fill").foregroundColor(Brand.faint) }.buttonStyle(.plain)
+                    }
+                }
+                .font(.system(size: 16))
+                .padding(.horizontal, 14).padding(.vertical, 11)
+                .background(RoundedRectangle(cornerRadius: Brand.r.tile, style: .continuous).fill(Brand.surface))
+                .padding(.horizontal, 20)
+                .padding(.bottom, 8)
+                if needle.isEmpty {
+                    Empty(text: "Cerca nella tua musica.\nInvio per cercare anche su YouTube.").padding(.top, 60)
+                }
+                if !local.isEmpty {
+                    SectionTitle(text: "Nella libreria", trailing: "\(local.count)").padding(.top, 14)
+                    ForEach(Array(local.enumerated()), id: \.element.id) { i, t in
+                        TrackRow(track: t) { player.play(ids, from: i) }.padding(.horizontal, 20)
+                    }
+                }
+                if !needle.isEmpty {
+                    Group {
+                        if !store.online {
+                            Footer(text: "Offline: cerco solo nella libreria.")
+                        } else if searching {
+                            HStack { Spacer(); ProgressView(); Spacer() }.padding(.vertical, 20)
+                        } else if let e = error {
+                            Footer(text: e)
+                        } else if found.isEmpty {
+                            Button { remote() } label: { Label("Cerca su YouTube", systemImage: "globe") }
+                                .buttonStyle(Pill(filled: false)).padding(.horizontal, 20).padding(.top, 14)
+                        } else {
+                            SectionTitle(text: "Da YouTube").padding(.top, 22)
+                            ForEach(found) { c in CandidateRow(c: c) { found.removeAll { $0.id == c.id } }.padding(.horizontal, 20) }
+                        }
+                    }
                 }
             }
-            .padding(.horizontal, 12).padding(.vertical, 10)
-            .background(RoundedRectangle(cornerRadius: Brand.r.small, style: .continuous).fill(Brand.surface))
-            .row()
-            if !local.isEmpty {
-                Header(text: "Nella libreria").row()
-                ForEach(Array(local.enumerated()), id: \.element.id) { i, t in
-                    TrackRow(track: t) { player.play(ids, from: i) }.row()
-                }
-            }
-            if !needle.isEmpty {
-                if !store.online {
-                    Footer(text: "Offline: cerco solo nella libreria.").row()
-                } else if searching {
-                    HStack { Spacer(); ProgressView(); Spacer() }.row()
-                } else if let e = error {
-                    Footer(text: e).row()
-                } else if found.isEmpty {
-                    Button { remote() } label: { Label("Cerca su YouTube", systemImage: "globe") }.buttonStyle(Pill(filled: false)).row()
-                } else {
-                    Header(text: "Da aggiungere").row()
-                    ForEach(found) { c in CandidateRow(c: c) { found.removeAll { $0.id == c.id } }.row() }
-                }
-            }
+            .padding(.bottom, 24)
         }
-        .page()
         .scrollDismissesKeyboard(.interactively)
+        .background(Brand.bg)
+        .navigationTitle("Cerca")
     }
 
     private func remote() {
@@ -351,81 +488,51 @@ struct CandidateRow: View {
     var body: some View {
         HStack(spacing: 12) {
             AsyncImage(url: URL(string: c.thumb)) { img in img.resizable().scaledToFill() } placeholder: { Rectangle().fill(Brand.raised) }
-                .frame(width: 46, height: 46)
-                .clipShape(RoundedRectangle(cornerRadius: Brand.r.small, style: .continuous))
+                .frame(width: 48, height: 48)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             VStack(alignment: .leading, spacing: 3) {
-                Text(c.title).font(.system(size: 15)).foregroundColor(Brand.fg).lineLimit(1)
+                Text(c.title).font(.system(size: 15.5, weight: .medium)).foregroundColor(Brand.fg).lineLimit(1)
                 Text([c.channel, c.duration > 0 ? mmss(c.duration) : ""].filter { !$0.isEmpty }.joined(separator: " · "))
-                    .font(.system(size: 12.5)).foregroundColor(Brand.dim).lineLimit(1)
+                    .font(.system(size: 13)).foregroundColor(Brand.dim).lineLimit(1)
             }
             Spacer(minLength: 8)
             if store.adding.contains(c.id) {
-                ProgressView().controlSize(.small)
+                ProgressView().controlSize(.small).frame(width: 32)
             } else {
                 Button {
                     Haptic.tap()
                     Task { if await store.add(c) { Haptic.ok(); added() } }
                 } label: {
-                    Image(systemName: "plus.circle.fill").font(.system(size: 24)).foregroundColor(Brand.fg)
+                    Image(systemName: "plus.circle.fill").font(.system(size: 26)).foregroundColor(Brand.fg)
                 }
                 .buttonStyle(Press())
             }
         }
+        .padding(.vertical, 7)
     }
 }
 
-struct DownloadsView: View {
-    @EnvironmentObject private var store: MusicStore
-    @EnvironmentObject private var player: MusicPlayer
-    @State private var confirm = false
+// MARK: small pieces
 
+struct SectionTitle: View {
+    let text: String
+    var trailing: String? = nil
     var body: some View {
-        let ts = store.downloadedTracks
-        let ids = ts.map(\.id)
-        List {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("\(ts.count) brani · \(megabytes(store.bytes)) sul telefono")
-                    .font(.system(size: 13)).foregroundColor(Brand.dim)
-                if store.downloading != nil || !store.pending.isEmpty {
-                    ProgressView(value: Double(store.done), total: Double(max(store.total, 1))).tint(Brand.fg)
-                    HStack {
-                        Text(store.online ? "Scarico \(min(store.done + 1, max(store.total, 1))) di \(max(store.total, 1))" : "In pausa: niente rete")
-                            .font(.system(size: 12)).foregroundColor(Brand.dim)
-                        Spacer()
-                        Button("Annulla") { store.cancelDownloads() }.font(.system(size: 13, weight: .semibold)).buttonStyle(.plain)
-                    }
-                }
-                if !ts.isEmpty {
-                    HStack(spacing: 10) {
-                        Button { player.play(ids) } label: { Label("Riproduci", systemImage: "play.fill") }.buttonStyle(Pill())
-                        Button { player.play(ids, shuffled: true) } label: { Label("Casuale", systemImage: "shuffle") }.buttonStyle(Pill(filled: false))
-                    }
-                }
-            }
-            .row()
-            ForEach(Array(ts.enumerated()), id: \.element.id) { i, t in
-                TrackRow(track: t) { player.play(ids, from: i) }.row()
-            }
-            .onDelete { offs in for o in offs { store.delete(ts[o].id) } }
-            if ts.isEmpty {
-                Empty(text: store.online ? "Scarico la libreria sul telefono…" : "Niente sul telefono: si scarica appena c'è rete.").row()
-            } else {
-                Button(role: .destructive) { confirm = true } label: { Text("Elimina tutti") }.buttonStyle(Pill(filled: false)).row()
-            }
+        HStack(alignment: .firstTextBaseline) {
+            Text(text).font(.system(size: 21, weight: .bold)).foregroundColor(Brand.fg)
+            Spacer()
+            if let t = trailing { Text(t).font(.system(size: 13).monospacedDigit()).foregroundColor(Brand.faint) }
         }
-        .page()
-        .confirmationDialog("Eliminare tutti i brani scaricati?", isPresented: $confirm, titleVisibility: .visible) {
-            Button("Elimina tutti", role: .destructive) { store.deleteAll() }
-        }
+        .padding(.horizontal, 20)
+        .padding(.bottom, 10)
     }
 }
 
 struct Empty: View {
     let text: String
     var body: some View {
-        Text(text).font(.system(size: 14)).foregroundColor(Brand.dim)
-            .frame(maxWidth: .infinity, alignment: .center).multilineTextAlignment(.center)
-            .padding(.vertical, 40)
+        Text(text).font(.system(size: 14)).foregroundColor(Brand.faint).multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity).padding(.vertical, 24)
     }
 }
 
