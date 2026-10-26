@@ -1,0 +1,34 @@
+name: musica
+# Musica (cloud.atlax.musica) built on a free public macOS runner: unsigned Release,
+# ad-hoc signed, artifact Musica-ipa (Musica-free.ipa). Source mirrored from framework-mono apps/os/ios.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  ipa:
+    runs-on: macos-15
+    env:
+      ATX_BUILD: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: brew install xcodegen
+      - name: Musica
+        working-directory: apps/os/ios
+        shell: bash
+        run: |
+          set -e
+          mkdir -p build
+          bun musica.ts
+          xcodegen generate --spec musica.json
+          xcodebuild -project Musica.xcodeproj -scheme Musica -sdk iphoneos -configuration Release \
+            -destination 'generic/platform=iOS' SYMROOT="$PWD/build/musica" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build > build/musica.log 2>&1 \
+            || { grep -E " error: |ld: |Undefined symbols" -A1 build/musica.log | awk '!seen[$0]++' | head -150; exit 1; }
+          sh pack.sh musica
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Musica-ipa
+          path: apps/os/out/ios/Musica-*.ipa
+          if-no-files-found: error
