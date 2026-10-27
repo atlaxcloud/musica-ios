@@ -4,8 +4,18 @@
 // the headphones. Its own IPA (cloud.atlax.musica), nothing shared with Atlax.
 import SwiftUI
 
+/// iOS relaunches the app in the background when a batch of downloads ends.
+final class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(_ app: UIApplication, handleEventsForBackgroundURLSession id: String, completionHandler: @escaping () -> Void) {
+        guard id == BackgroundFetch.identifier else { return completionHandler() }
+        BackgroundFetch.shared.finishEvents = completionHandler
+        _ = BackgroundFetch.shared.session
+    }
+}
+
 @main
 struct MusicaApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var store = MusicStore.shared
     @StateObject private var player = MusicPlayer.shared
 

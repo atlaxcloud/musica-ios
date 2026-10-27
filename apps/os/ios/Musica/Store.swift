@@ -86,9 +86,6 @@ final class MusicStore: ObservableObject {
     @Published private(set) var adding: Set<String> = []
 
     private var byId: [String: Track] = [:]
-    private var pumping = false
-    /// Files fetched at once: the PC bridge is slow per file, not per byte.
-    private let workers = 3
     private let monitor = NWPathMonitor()
 
     init() {
@@ -103,6 +100,8 @@ final class MusicStore: ObservableObject {
         }
         scan()
         needsLogin = !Auth.signedIn
+        // A relaunch after iOS kept downloading: what is still on its way is not queued again.
+        BackgroundFetch.shared.running { ids in MusicStore.shared.adopt(ids) }
         monitor.pathUpdateHandler = { path in
             let up = path.status == .satisfied
             Task { @MainActor in MusicStore.shared.reach(up) }
@@ -303,84 +302,67 @@ final class MusicStore: ObservableObject {
 
     func cancelDownloads() {
         pending = []
+        inFlight = []
         total = done
+        BackgroundFetch.shared.cancelAll()
         saveState()
     }
 
-    /// One file at a time, in order; the queue is on disk, so a cut (no
-    /// network, app killed) resumes from where it stopped at the next refresh.
+    /// Hands the queue to iOS: a background session keeps going with the app closed or
+    /// the phone locked; 3 at a time on the PC, the head (a tapped track) first.
     func pump() {
-        guard !pumping, !pending.isEmpty, online, Auth.signedIn else { return }
-        pumping = true
-        Task { await runQueue() }
-    }
-
-    private func runQueue() async {
-        var bg: UIBackgroundTaskIdentifier = .invalid
-        bg = UIApplication.shared.beginBackgroundTask(withName: "musica.download") {
-            UIApplication.shared.endBackgroundTask(bg)
-            bg = .invalid
-        }
-        defer {
-            if bg != .invalid { UIApplication.shared.endBackgroundTask(bg) }
-            pumping = false
-            inFlight = []
-            if pending.isEmpty { done = 0; total = 0 }
-            saveState()
-        }
+        guard online, Auth.signedIn, !pending.isEmpty else { return }
         if total < pending.count + done { total = pending.count + done }
-        await withTaskGroup(of: Void.self) { g in
-            for _ in 0..<workers { g.addTask { await MusicStore.shared.worker() } }
-        }
-    }
-
-    /// One lane of the queue: takes the next id (the head, so a tapped track goes first)
-    /// until the queue is empty or a stop (no network, PC off, signed out) clears it.
-    private func worker() async {
-        while online, let id = pending.first(where: { !inFlight.contains($0) }) {
+        for id in pending where !inFlight.contains(id) {
             guard let t = byId[id], files[id] == nil else { pending.removeAll { $0 == id }; continue }
             inFlight.insert(id)
-            defer { inFlight.remove(id) }
-            do {
-                try await fetch(t)
-                pending.removeAll { $0 == id }
-                done += 1
-                note = nil
-                saveState()
-            } catch MusicError.auth {
-                needsLogin = true
-                return
-            } catch MusicError.http(let c) where c == 404 || c == 400 || c == 415 {
-                pending.removeAll { $0 == id }
-                done += 1
-            } catch MusicError.pcOff {
-                pcOn = false
-                return
-            } catch {
-                return
-            }
+            BackgroundFetch.shared.start(t, high: id == pending.first)
         }
+        saveState()
     }
 
-    private func fetch(_ t: Track) async throws {
-        let (tmp, resp) = try await MusicAPI.files.download(for: MusicAPI.get(MusicAPI.fileURL(t.rel), timeout: 60))
-        Auth.absorb(resp)
-        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-        let type = ((resp as? HTTPURLResponse)?.value(forHTTPHeaderField: "content-type") ?? "").lowercased()
+    func adopt(_ ids: Set<String>) {
+        inFlight.formUnion(ids)
+        pump()
+    }
+
+    /// A file iOS finished: checked and moved into Music/audio.
+    func fetched(_ id: String, staged: URL?, code: Int, type: String) {
+        inFlight.remove(id)
         let fm = FileManager.default
+        guard let tmp = staged else { return fetchFailed(id, cancelled: false) }
         guard code == 200 || code == 206, !type.contains("json"), !type.contains("html") else {
             try? fm.removeItem(at: tmp)
-            if code == 401 || code == 403 { throw MusicError.auth }
-            if code == 503 { throw MusicError.pcOff }
-            throw MusicError.http(code == 200 ? 415 : code)
+            if code == 401 || code == 403 { needsLogin = true; return settle() }
+            if code == 503 { pcOn = false; return settle() }
+            pending.removeAll { $0 == id }  // 404/415: never coming, do not loop on it
+            done += 1
+            return settle()
         }
+        guard let t = byId[id] else { try? fm.removeItem(at: tmp); pending.removeAll { $0 == id }; return settle() }
         let dst = Disk.audio.appendingPathComponent(t.fileName)
         try? fm.removeItem(at: dst)
-        try fm.moveItem(at: tmp, to: dst)
+        guard (try? fm.moveItem(at: tmp, to: dst)) != nil else { return fetchFailed(id, cancelled: false) }
         Disk.exclude(dst)
         files[t.id] = dst
         bytes += Disk.size(dst)
-        _ = await Covers.shared.load(t)
+        pending.removeAll { $0 == id }
+        done += 1
+        note = nil
+        settle()
+        Task { _ = await Covers.shared.load(t) }
+    }
+
+    /// Network cut or PC gone: the id stays queued, the next refresh sends it again.
+    func fetchFailed(_ id: String, cancelled: Bool) {
+        inFlight.remove(id)
+        if cancelled { pending.removeAll { $0 == id } }
+        settle()
+    }
+
+    private func settle() {
+        if pending.isEmpty && inFlight.isEmpty { done = 0; total = 0 }
+        saveState()
     }
 
     func delete(_ id: String) {
