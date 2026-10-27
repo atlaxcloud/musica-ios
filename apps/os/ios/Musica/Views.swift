@@ -406,6 +406,8 @@ struct SearchView: View {
             $0.title.localizedCaseInsensitiveContains(needle) || $0.artist.localizedCaseInsensitiveContains(needle) || $0.album.localizedCaseInsensitiveContains(needle)
         }
         let ids = local.map(\.id)
+        let have = Set(store.tracks.map(\.id))
+        let fresh = found.filter { !have.contains($0.id) || store.adding.contains($0.id) }
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 HStack(spacing: 8) {
@@ -414,7 +416,7 @@ struct SearchView: View {
                         .focused($focused)
                         .submitLabel(.search)
                         .autocorrectionDisabled()
-                        .onSubmit { remote() }
+                        .onSubmit { focused = false; remote(needle) }
                     if !q.isEmpty {
                         Button { q = ""; found = [] } label: { Image(systemName: "xmark.circle.fill").foregroundColor(Brand.faint) }.buttonStyle(.plain)
                     }
@@ -425,7 +427,7 @@ struct SearchView: View {
                 .padding(.horizontal, 20)
                 .padding(.bottom, 8)
                 if needle.isEmpty {
-                    Empty(text: "Cerca nella tua musica.\nInvio per cercare anche su YouTube.").padding(.top, 60)
+                    Empty(text: "Cerca nella tua musica e su YouTube.\nTocca un risultato di YouTube: si aggiunge e parte.").padding(.top, 60)
                 }
                 if !local.isEmpty {
                     SectionTitle(text: "Nella libreria", trailing: "\(local.count)").padding(.top, 14)
@@ -437,16 +439,15 @@ struct SearchView: View {
                     Group {
                         if !store.online {
                             Footer(text: "Offline: cerco solo nella libreria.")
+                        } else if !fresh.isEmpty {
+                            SectionTitle(text: "Da YouTube", trailing: searching ? "…" : nil).padding(.top, 22)
+                            ForEach(fresh) { c in CandidateRow(c: c).padding(.horizontal, 20) }
                         } else if searching {
-                            HStack { Spacer(); ProgressView(); Spacer() }.padding(.vertical, 20)
+                            HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Cerco su YouTube…") }
+                                .font(.system(size: 13)).foregroundColor(Brand.dim)
+                                .frame(maxWidth: .infinity).padding(.vertical, 22)
                         } else if let e = error {
                             Footer(text: e)
-                        } else if found.isEmpty {
-                            Button { remote() } label: { Label("Cerca su YouTube", systemImage: "globe") }
-                                .buttonStyle(Pill(filled: false)).padding(.horizontal, 20).padding(.top, 14)
-                        } else {
-                            SectionTitle(text: "Da YouTube").padding(.top, 22)
-                            ForEach(found) { c in CandidateRow(c: c) { found.removeAll { $0.id == c.id } }.padding(.horizontal, 20) }
                         }
                     }
                 }
@@ -456,59 +457,87 @@ struct SearchView: View {
         .scrollDismissesKeyboard(.interactively)
         .background(Brand.bg)
         .navigationTitle("Cerca")
+        // YouTube as you type: a short pause after the last letter, the newest query wins.
+        .task(id: needle) {
+            guard needle.count >= 2 else { found = []; error = nil; return }
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            guard !Task.isCancelled else { return }
+            remote(needle)
+        }
     }
 
-    private func remote() {
-        let needle = q.trimmingCharacters(in: .whitespaces)
-        guard !needle.isEmpty, store.online, !searching else { return }
-        focused = false
+    private func remote(_ needle: String) {
+        guard !needle.isEmpty, store.online else { return }
         searching = true
         error = nil
         Task {
-            defer { searching = false }
-            do {
-                found = try await store.search(needle).found
-                if found.isEmpty { error = "Nessun risultato da aggiungere." }
-            } catch MusicError.auth {
-                error = "Serve l'accesso."
-            } catch MusicError.pcOff {
-                error = "Il PC è spento: la ricerca passa da lì."
-            } catch {
-                self.error = "Ricerca non riuscita."
+            let r: Result<[Candidate], Error>
+            do { r = .success(try await store.search(needle).found) } catch { r = .failure(error) }
+            // An older answer that arrives late must not replace the newer one.
+            guard q.trimmingCharacters(in: .whitespaces) == needle else { return }
+            searching = false
+            switch r {
+            case .success(let c):
+                found = c
+                if c.isEmpty { error = "Niente su YouTube." }
+            case .failure(let e):
+                switch e as? MusicError {
+                case .auth?: error = "Serve l'accesso."
+                case .pcOff?: error = "Il PC è spento: la ricerca passa da lì."
+                default: error = "Ricerca non riuscita."
+                }
             }
         }
     }
 }
 
+/// A YouTube result: tap = into the library and playing; + = only into the library.
 struct CandidateRow: View {
     @EnvironmentObject private var store: MusicStore
+    @EnvironmentObject private var player: MusicPlayer
     let c: Candidate
-    let added: () -> Void
 
     var body: some View {
+        let busy = store.adding.contains(c.id)
         HStack(spacing: 12) {
-            AsyncImage(url: URL(string: c.thumb)) { img in img.resizable().scaledToFill() } placeholder: { Rectangle().fill(Brand.raised) }
-                .frame(width: 48, height: 48)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(c.title).font(.system(size: 15.5, weight: .medium)).foregroundColor(Brand.fg).lineLimit(1)
-                Text([c.channel, c.duration > 0 ? mmss(c.duration) : ""].filter { !$0.isEmpty }.joined(separator: " · "))
-                    .font(.system(size: 13)).foregroundColor(Brand.dim).lineLimit(1)
+            Button { take(play: true) } label: {
+                HStack(spacing: 12) {
+                    AsyncImage(url: URL(string: c.thumb)) { img in img.resizable().scaledToFill() } placeholder: { Rectangle().fill(Brand.raised) }
+                        .frame(width: 48, height: 48)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(c.title).font(.system(size: 15.5, weight: .medium)).foregroundColor(Brand.fg).lineLimit(1)
+                        Text(busy ? "Lo prendo da YouTube…" : [c.channel, c.duration > 0 ? mmss(c.duration) : ""].filter { !$0.isEmpty }.joined(separator: " · "))
+                            .font(.system(size: 13)).foregroundColor(Brand.dim).lineLimit(1)
+                    }
+                    Spacer(minLength: 8)
+                }
+                .contentShape(Rectangle())
             }
-            Spacer(minLength: 8)
-            if store.adding.contains(c.id) {
+            .buttonStyle(.plain)
+            .disabled(busy)
+            if busy {
                 ProgressView().controlSize(.small).frame(width: 32)
             } else {
-                Button {
-                    Haptic.tap()
-                    Task { if await store.add(c) { Haptic.ok(); added() } }
-                } label: {
+                Button { take(play: false) } label: {
                     Image(systemName: "plus.circle.fill").font(.system(size: 26)).foregroundColor(Brand.fg)
                 }
                 .buttonStyle(Press())
             }
         }
         .padding(.vertical, 7)
+    }
+
+    /// The PC fetches it into the library (some seconds); with `play` it starts right after.
+    private func take(play: Bool) {
+        guard !store.adding.contains(c.id) else { return }
+        Haptic.tap()
+        let id = c.id
+        Task {
+            guard await store.add(c) else { return }
+            Haptic.ok()
+            if play, store.track(id) != nil { player.play([id]) }
+        }
     }
 }
 

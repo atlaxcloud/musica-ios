@@ -1,4 +1,5 @@
-// Musica: the player. One AVPlayer, a queue of our own (shuffle, repeat),
+// Musica: the player. One AVQueuePlayer holding the current track and the next
+// one already loaded (gapless, and it moves on by itself with the screen locked), a queue of our own (shuffle, repeat),
 // files from the phone first and the PC's stream only when there is none.
 // The lock screen and the headphones drive it (MPRemoteCommandCenter), Now
 // Playing shows title, artist, cover and time; calls and alarms pause it and
@@ -32,11 +33,14 @@ final class MusicPlayer: ObservableObject {
     @Published private(set) var time: Double = 0
     @Published private(set) var duration: Double = 0
     @Published private(set) var shuffle = false
-    @Published var repeatMode: Repeat = .off { didSet { save() } }
+    @Published var repeatMode: Repeat = .off { didSet { save(); prepareNext() } }
     @Published var full = false
     @Published private(set) var message: String?
 
-    private let player = AVPlayer()
+    private let player = AVQueuePlayer()
+    /// The track after the current one, already in the queue player, and where it sits in `queue`.
+    private var nextItem: AVPlayerItem?
+    private var nextIndex: Int?
     private var bag = Set<AnyCancellable>()
     private var itemBag = Set<AnyCancellable>()
     private var timeObserver: Any?
@@ -59,7 +63,18 @@ final class MusicPlayer: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { s in Task { @MainActor in MusicPlayer.shared.status(s) } }
             .store(in: &bag)
+        player.publisher(for: \.currentItem)
+            .receive(on: DispatchQueue.main)
+            .sink { item in Task { @MainActor in MusicPlayer.shared.moved(to: item) } }
+            .store(in: &bag)
         let nc = NotificationCenter.default
+        nc.publisher(for: .AVPlayerItemFailedToPlayToEndTime)
+            .receive(on: DispatchQueue.main)
+            .sink { n in
+                let item = n.object as? AVPlayerItem
+                Task { @MainActor in MusicPlayer.shared.cut(item) }
+            }
+            .store(in: &bag)
         nc.publisher(for: .AVPlayerItemDidPlayToEndTime)
             .receive(on: DispatchQueue.main)
             .sink { n in
@@ -165,6 +180,7 @@ final class MusicPlayer: ObservableObject {
             index = original.firstIndex(of: cur) ?? 0
         }
         save(force: true)
+        prepareNext()
     }
 
     func cycleRepeat() {
@@ -177,6 +193,7 @@ final class MusicPlayer: ObservableObject {
         queue.insert(id, at: index + 1)
         if let i = original.firstIndex(of: queue[index]) { original.insert(id, at: i + 1) } else { original.append(id) }
         save(force: true)
+        prepareNext()
     }
 
     func enqueue(_ id: String) {
@@ -184,6 +201,7 @@ final class MusicPlayer: ObservableObject {
         queue.append(id)
         original.append(id)
         save(force: true)
+        prepareNext()
     }
 
     /// Removes from the "up next" part (offsets relative to `upNext`).
@@ -192,6 +210,7 @@ final class MusicPlayer: ObservableObject {
         for o in offsets.sorted(by: >) { queue.remove(at: index + 1 + o) }
         for id in gone { if let i = original.lastIndex(of: id) { original.remove(at: i) } }
         save(force: true)
+        prepareNext()
     }
 
     func moveUpNext(from: IndexSet, to: Int) {
@@ -199,11 +218,14 @@ final class MusicPlayer: ObservableObject {
         up.move(fromOffsets: from, toOffset: to)
         queue = Array(queue[...index]) + up
         save(force: true)
+        prepareNext()
     }
 
     func stop() {
         player.pause()
-        player.replaceCurrentItem(with: nil)
+        player.removeAllItems()
+        nextItem = nil
+        nextIndex = nil
         loadedId = nil
         queue = []
         original = []
@@ -260,7 +282,10 @@ final class MusicPlayer: ObservableObject {
                         Task { @MainActor in MusicPlayer.shared.failed(t.id) }
                     }
                     .store(in: &itemBag)
-                player.replaceCurrentItem(with: item)
+                player.removeAllItems()
+                nextItem = nil
+                nextIndex = nil
+                player.insert(item, after: nil)
                 loadedId = t.id
                 time = start
                 duration = t.duration
@@ -273,6 +298,7 @@ final class MusicPlayer: ObservableObject {
                 }
                 nowPlaying()
                 save(force: true)
+                prepareNext()
                 return
             }
             tries += 1
@@ -298,10 +324,86 @@ final class MusicPlayer: ObservableObject {
         if failures < max(queue.count, 1) { advance(auto: true) } else { pause() }
     }
 
-    private func ended(_ item: AVPlayerItem?) {
-        guard item === player.currentItem else { return }
+    /// The track after the current one, loaded behind it (skipping what cannot play now).
+    /// Repeat-one keeps the item: it rewinds at the end instead.
+    private func prepareNext() {
+        if let n = nextItem { player.remove(n) }
+        nextItem = nil
+        nextIndex = nil
+        player.actionAtItemEnd = repeatMode == .one ? .none : .advance
+        guard repeatMode != .one, !queue.isEmpty, player.currentItem != nil else { return }
+        var i = index
+        for _ in 0..<queue.count {
+            i += 1
+            if i >= queue.count {
+                guard repeatMode == .all else { return }
+                i = 0
+            }
+            if i == index { return }
+            if let t = store.track(queue[i]), let item = laterItem(t) {
+                player.insert(item, after: player.currentItem)
+                nextItem = item
+                nextIndex = i
+                return
+            }
+        }
+    }
+
+    /// Like makeItem, but a stream for later does not jump the download queue.
+    private func laterItem(_ t: Track) -> AVPlayerItem? {
+        if let f = store.file(t.id) { return AVPlayerItem(url: f) }
+        guard store.playable(t) else { return nil }
+        return AVPlayerItem(asset: AVURLAsset(url: MusicAPI.fileURL(t.rel), options: [AVURLAssetHTTPCookiesKey: Auth.cookies]))
+    }
+
+    /// iOS moved on to the preloaded track: the queue follows, and the one after gets loaded.
+    private func moved(to item: AVPlayerItem?) {
+        guard let item = item, item === nextItem, let i = nextIndex, queue.indices.contains(i) else { return }
+        nextItem = nil
+        nextIndex = nil
+        index = i
+        let id = queue[i]
+        loadedId = id
+        time = 0
+        duration = current?.duration ?? 0
         failures = 0
+        message = nil
+        itemBag = []
+        item.publisher(for: \.status)
+            .receive(on: DispatchQueue.main)
+            .sink { s in
+                guard s == .failed else { return }
+                Task { @MainActor in MusicPlayer.shared.failed(id) }
+            }
+            .store(in: &itemBag)
+        if store.file(id) == nil { store.prioritize(id) }
+        nowPlaying()
+        save(force: true)
+        prepareNext()
+    }
+
+    private func ended(_ item: AVPlayerItem?) {
+        failures = 0
+        if repeatMode == .one {
+            seek(0)
+            player.play()
+            return
+        }
+        // With the next one preloaded the queue player has already moved on (see `moved`).
+        if nextItem != nil || (player.currentItem != nil && item !== player.currentItem) { return }
+        if player.currentItem == nil && index + 1 >= queue.count && repeatMode != .all {
+            // End of the queue: stop on the last one, from the start, ready to play again.
+            playing = false
+            load(autoplay: false, step: 1)
+            return
+        }
+        // Nothing loaded behind it: go the slow way.
         advance(auto: true)
+    }
+
+    private func cut(_ item: AVPlayerItem?) {
+        guard item === player.currentItem, let id = loadedId else { return }
+        failed(id)
     }
 
     private func tick(_ s: Double) {
