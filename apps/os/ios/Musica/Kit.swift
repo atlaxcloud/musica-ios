@@ -89,12 +89,7 @@ struct TrackRow: View {
                             .foregroundColor(ok ? Brand.fg : Brand.faint)
                             .lineLimit(1)
                         HStack(spacing: 5) {
-                            // On the phone is the norm: no mark. Only what is not here yet says so, small.
-                            if store.inFlight.contains(track.id) {
-                                ProgressView().controlSize(.mini).scaleEffect(0.8).frame(width: 11, height: 11)
-                            } else if !store.isDownloaded(track.id) {
-                                Image(systemName: "icloud").font(.system(size: 10, weight: .semibold))
-                            }
+                            DownloadMark(id: track.id)
                             Text(track.artist.isEmpty ? mmss(track.duration) : track.artist).lineLimit(1)
                         }
                         .font(.system(size: 13))
@@ -114,7 +109,58 @@ struct TrackRow: View {
             }
         }
         .padding(.vertical, 5)
+        .opacity(ok ? 1 : 0.45)
         .contextMenu { TrackMenu(track: track, playlist: playlist) }
+    }
+}
+
+extension Brand {
+    /// The one colour of the app: "this is on the phone".
+    static let here = Color(red: 0.19, green: 0.84, blue: 0.45)
+}
+
+/// Where a track is, at a glance: green arrow = on the phone (plays offline),
+/// a ring = downloading now, grey arrow = queued, cloud = only on the PC.
+struct DownloadMark: View {
+    @EnvironmentObject private var store: MusicStore
+    let id: String
+
+    var body: some View {
+        Group {
+            if store.isDownloaded(id) {
+                Image(systemName: "arrow.down.circle.fill").foregroundColor(Brand.here)
+            } else if store.inFlight.contains(id) {
+                ProgressView().controlSize(.mini).scaleEffect(0.75)
+            } else if store.pending.contains(id) {
+                Image(systemName: "arrow.down.circle").foregroundColor(Brand.faint)
+            } else {
+                Image(systemName: "icloud").foregroundColor(Brand.faint)
+            }
+        }
+        .font(.system(size: 12, weight: .semibold))
+        .frame(width: 13, height: 13)
+    }
+}
+
+/// "On the phone" for a set of tracks: green check when all are, else how many.
+struct HereLine: View {
+    @EnvironmentObject private var store: MusicStore
+    let ids: [String]
+    var size: CGFloat = 12.5
+
+    var body: some View {
+        let ids = ids.filter { store.track($0)?.supported ?? false }
+        let all = ids.count
+        let have = ids.filter { store.isDownloaded($0) }.count
+        HStack(spacing: 5) {
+            Image(systemName: have >= all ? "arrow.down.circle.fill" : "arrow.down.circle")
+                .foregroundColor(have >= all ? Brand.here : Brand.faint)
+                .font(.system(size: size - 1, weight: .semibold))
+            Text(have >= all ? "\(all) brani, tutti sul telefono" : "\(have) di \(all) sul telefono")
+                .font(.system(size: size).monospacedDigit())
+                .foregroundColor(Brand.dim)
+                .lineLimit(1)
+        }
     }
 }
 

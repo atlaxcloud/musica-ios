@@ -214,6 +214,7 @@ struct Status: View {
                 HStack(spacing: 6) {
                     Image(systemName: icon(all: all, have: have))
                         .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(store.online && have >= all ? Brand.here : Brand.dim)
                     Text(text).font(.system(size: 12.5).monospacedDigit()).lineLimit(1)
                 }
                 .foregroundColor(Brand.dim)
@@ -231,14 +232,15 @@ struct Status: View {
 
     private func icon(all: Int, have: Int) -> String {
         if !store.online { return "wifi.slash" }
-        return have >= all ? "checkmark.circle.fill" : "arrow.down.circle"
+        return have >= all ? "arrow.down.circle.fill" : "arrow.down.circle"
     }
 
     private func line(all: Int, have: Int, busy: Bool) -> String {
         if !store.online { return "Offline · \(have) brani sul telefono" }
         if !store.pcOn && store.syncedAt != nil && have < all { return "PC spento · \(have) di \(all) sul telefono" }
         if busy { return "Scarico sul telefono · \(have) di \(all)" }
-        return all == 0 ? "" : "Tutto sul telefono"
+        if have < all { return "\(have) di \(all) sul telefono" }
+        return all == 0 ? "" : "Tutti i \(all) brani sul telefono: vanno anche offline"
     }
 }
 
@@ -318,7 +320,7 @@ struct PlaylistCard: View {
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(playlist.name).font(.system(size: 15, weight: .semibold)).foregroundColor(Brand.fg).lineLimit(1)
-                Text("\(playlist.ids.count) brani").font(.system(size: 12.5)).foregroundColor(Brand.dim)
+                HereLine(ids: playlist.ids, size: 12)
             }
         }
         .frame(width: side)
@@ -347,6 +349,7 @@ struct PlaylistView: View {
                     Text(name).font(.system(size: 26, weight: .bold)).multilineTextAlignment(.center).lineLimit(2)
                     Text("\(ts.count) brani · \(minutes >= 60 ? "\(minutes / 60) h \(minutes % 60) min" : "\(minutes) min")")
                         .font(.system(size: 13).monospacedDigit()).foregroundColor(Brand.dim)
+                    if !ts.isEmpty { HereLine(ids: ids, size: 13) }
                 }
                 HStack(spacing: 10) {
                     Button { player.play(ids) } label: { Label("Riproduci", systemImage: "play.fill") }.buttonStyle(Pill())
