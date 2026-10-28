@@ -161,7 +161,8 @@ struct TrackRow: View {
                             .foregroundColor(ok ? Brand.fg : Brand.faint)
                             .lineLimit(1)
                         HStack(spacing: 5) {
-                            DownloadMark(id: track.id)
+                            // On the phone is the normal case: only what is not there gets a mark.
+                            if !store.isDownloaded(track.id) { DownloadMark(id: track.id) }
                             Text(track.artist.isEmpty ? mmss(track.duration) : track.artist).lineLimit(1)
                         }
                         .font(.system(size: 13))
@@ -225,10 +226,13 @@ struct HereLine: View {
         let all = ids.count
         let have = ids.filter { store.isDownloaded($0) }.count
         HStack(spacing: 5) {
-            Image(systemName: have >= all ? "arrow.down.circle.fill" : "arrow.down.circle")
-                .foregroundColor(have >= all ? Brand.here : Brand.faint)
-                .font(.system(size: size - 1, weight: .semibold))
-            Text(have >= all ? "\(all) brani, tutti sul telefono" : "\(have) di \(all) sul telefono")
+            // All on the phone is the normal case: no mark, just the count.
+            if have < all {
+                Image(systemName: "icloud")
+                    .foregroundColor(Brand.faint)
+                    .font(.system(size: size - 1, weight: .semibold))
+            }
+            Text(have >= all ? "\(all) brani" : "\(all - have) da scaricare")
                 .font(.system(size: size).monospacedDigit())
                 .foregroundColor(Brand.dim)
                 .lineLimit(1)

@@ -135,14 +135,14 @@ struct HomeView: View {
                     .padding(.horizontal, 20)
                     if !store.playlists.isEmpty {
                         SectionTitle(text: "Le tue playlist").padding(.top, 30)
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            LazyHStack(alignment: .top, spacing: 14) {
-                                ForEach(store.playlists) { p in
-                                    NavigationLink(value: p.name) { PlaylistCard(playlist: p, side: 148) }.buttonStyle(Press())
-                                }
+                        // Two columns of compact tiles: every playlist one tap away, no sideways scroll.
+                        LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+                            ForEach(store.playlists) { p in
+                                NavigationLink(value: p.name) { PlaylistTile(playlist: p) }.buttonStyle(Press())
                             }
-                            .padding(.horizontal, 20)
                         }
+                        .padding(.horizontal, 20)
+                        .padding(.top, 2)
                     }
                     SectionTitle(text: "Tutti i brani", trailing: "\(store.tracks.count)").padding(.top, 30).padding(.bottom, 2)
                     rows(store.tracks)
@@ -265,8 +265,8 @@ struct Status: View {
         if !store.online { return "Offline · \(have) brani sul telefono" }
         if !store.pcOn && store.syncedAt != nil && have < all { return "PC spento · \(have) di \(all) sul telefono" }
         if busy { return "Scarico sul telefono · \(have) di \(all)" }
-        if have < all { return "\(have) di \(all) sul telefono" }
-        return all == 0 ? "" : "Tutti i \(all) brani sul telefono: vanno anche offline"
+        if have < all { return "\(all - have) brani da scaricare" }
+        return ""  // all on the phone is the normal case: nothing to say
     }
 }
 
@@ -362,6 +362,39 @@ struct PlaylistCard: View {
     }
 }
 
+/// Home's quick tile: covers on the left, name and count on the right, in a raised card.
+struct PlaylistTile: View {
+    @EnvironmentObject private var store: MusicStore
+    let playlist: Playlist
+
+    var body: some View {
+        let ids = playlist.ids.filter { store.track($0)?.supported ?? false }
+        let missing = ids.filter { !store.isDownloaded($0) }.count
+        HStack(spacing: 10) {
+            Mosaic(ids: playlist.ids, radius: Brand.r.small).frame(width: 52, height: 52)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(playlist.name)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(Brand.fg)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                HStack(spacing: 4) {
+                    if missing > 0 { Image(systemName: "icloud").font(.system(size: 10, weight: .semibold)) }
+                    Text(missing > 0 ? "\(missing) da scaricare" : "\(ids.count) brani")
+                }
+                .font(.system(size: 11.5).monospacedDigit())
+                .foregroundColor(Brand.dim)
+                .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(6)
+        .padding(.trailing, 4)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RoundedRectangle(cornerRadius: Brand.r.tile, style: .continuous).fill(Brand.raised))
+    }
+}
+
 struct PlaylistView: View {
     @EnvironmentObject private var store: MusicStore
     @EnvironmentObject private var player: MusicPlayer
@@ -394,7 +427,7 @@ struct PlaylistView: View {
                     Text(name).font(.system(size: 26, weight: .bold)).multilineTextAlignment(.center).lineLimit(2)
                     Text("\(ts.count) brani · \(minutes >= 60 ? "\(minutes / 60) h \(minutes % 60) min" : "\(minutes) min")")
                         .font(.system(size: 13).monospacedDigit()).foregroundColor(Brand.dim)
-                    if !ts.isEmpty { HereLine(ids: ids, size: 13) }
+                    if ids.contains(where: { !store.isDownloaded($0) && (store.track($0)?.supported ?? false) }) { HereLine(ids: ids, size: 13) }
                 }
                 HStack(spacing: 10) {
                     Button { player.play(ids) } label: { Label("Riproduci", systemImage: "play.fill") }.buttonStyle(Pill())
