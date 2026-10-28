@@ -27,6 +27,7 @@ struct RootView: View {
     @Environment(\.scenePhase) private var phase
     @AppStorage("musica.tab") private var tab = Pane.home.rawValue
     @State private var login = false
+    @State private var barH: CGFloat = 120
 
     var body: some View {
         let pane = Pane(rawValue: tab) ?? .home
@@ -34,18 +35,23 @@ struct RootView: View {
             Brand.bg.ignoresSafeArea()
             // Every tab keeps its own stack (and its scroll) while you switch.
             ForEach(Pane.allCases) { p in
-                NavigationStack { screen(p) }
+                NavigationStack { screen(p).underBar() }
+                    .environment(\.barInset, barH)
                     .opacity(p == pane ? 1 : 0)
                     .allowsHitTesting(p == pane)
             }
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+        // Floating over the lists; each screen reserves its height (underBar), so the last
+        // row scrolls up clear of it instead of ending underneath.
+        .overlay(alignment: .bottom) {
             VStack(spacing: 6) {
                 if player.current != nil { MiniPlayer().transition(.move(edge: .bottom).combined(with: .opacity)) }
                 TabBar(tab: $tab)
             }
             .animation(.spring(response: 0.35, dampingFraction: 0.86), value: player.current?.id)
+            .background(GeometryReader { g in Color.clear.preference(key: BarHeight.self, value: g.size.height) })
         }
+        .onPreferenceChange(BarHeight.self) { barH = $0 }
         .fullScreenCover(isPresented: $player.full) { FullPlayer() }
         .sheet(isPresented: $login) { LoginSheet() }
         .onAppear { if store.needsLogin && store.online { login = true } }
@@ -70,6 +76,33 @@ struct RootView: View {
         case .search: SearchView()
         }
     }
+}
+
+private struct BarHeight: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+private struct BarInsetKey: EnvironmentKey { static let defaultValue: CGFloat = 0 }
+
+extension EnvironmentValues {
+    /// Height of the floating mini player + tab bar.
+    var barInset: CGFloat {
+        get { self[BarInsetKey.self] }
+        set { self[BarInsetKey.self] = newValue }
+    }
+}
+
+private struct UnderBar: ViewModifier {
+    @Environment(\.barInset) private var h
+    func body(content: Content) -> some View {
+        content.safeAreaInset(edge: .bottom, spacing: 0) { Color.clear.frame(height: h + 8) }
+    }
+}
+
+extension View {
+    /// A screen under the floating bar: its scroll ends above it.
+    func underBar() -> some View { modifier(UnderBar()) }
 }
 
 /// The bottom bar: three icons with their names, on glass, the selected one white.
@@ -150,7 +183,7 @@ struct HomeView: View {
         .refreshable { await store.refresh() }
         .background(Brand.bg)
         .navigationTitle("Musica")
-        .navigationDestination(for: String.self) { PlaylistView(name: $0) }
+        .navigationDestination(for: String.self) { PlaylistView(name: $0).underBar() }
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
@@ -285,7 +318,7 @@ struct PlaylistsView: View {
         .refreshable { await store.refresh() }
         .background(Brand.bg)
         .navigationTitle("Playlist")
-        .navigationDestination(for: String.self) { PlaylistView(name: $0) }
+        .navigationDestination(for: String.self) { PlaylistView(name: $0).underBar() }
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button { name = ""; naming = true } label: { Image(systemName: "plus").font(.system(size: 17, weight: .semibold)) }
@@ -402,6 +435,7 @@ struct SearchView: View {
     @State private var searching = false
     @State private var error: String?
     @FocusState private var focused: Bool
+    @AppStorage("musica.tab") private var tab = Pane.home.rawValue
 
     var body: some View {
         let needle = q.trimmingCharacters(in: .whitespaces)
@@ -460,10 +494,12 @@ struct SearchView: View {
         .scrollDismissesKeyboard(.interactively)
         .background(Brand.bg)
         .navigationTitle("Cerca")
+        // Opening Cerca with nothing typed: the keyboard is already up.
+        .onChange(of: tab) { t in if t == Pane.search.rawValue && q.isEmpty { focused = true } }
         // YouTube as you type: a short pause after the last letter, the newest query wins.
         .task(id: needle) {
             guard needle.count >= 2 else { found = []; error = nil; return }
-            try? await Task.sleep(nanoseconds: 600_000_000)
+            try? await Task.sleep(nanoseconds: 250_000_000)
             guard !Task.isCancelled else { return }
             remote(needle)
         }
@@ -475,7 +511,7 @@ struct SearchView: View {
         error = nil
         Task {
             let r: Result<[Candidate], Error>
-            do { r = .success(try await store.search(needle).found) } catch { r = .failure(error) }
+            do { r = .success(try await store.search(needle)) } catch { r = .failure(error) }
             // An older answer that arrives late must not replace the newer one.
             guard q.trimmingCharacters(in: .whitespaces) == needle else { return }
             searching = false
@@ -486,8 +522,7 @@ struct SearchView: View {
             case .failure(let e):
                 switch e as? MusicError {
                 case .auth?: error = "Serve l'accesso."
-                case .pcOff?: error = "Il PC è spento: la ricerca passa da lì."
-                default: error = "Ricerca non riuscita."
+                                default: error = "Ricerca non riuscita."
                 }
             }
         }

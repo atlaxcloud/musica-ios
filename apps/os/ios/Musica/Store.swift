@@ -7,6 +7,7 @@
 //   Music/player.json    the queue and the position (Player.swift)
 //   Music/audio/<id>.<ext>, Music/cover/<id>.jpg
 import Foundation
+import ImageIO
 import Network
 import SwiftUI
 import UIKit
@@ -199,16 +200,28 @@ final class MusicStore: ObservableObject {
         scan()
     }
 
-    /// Search on YouTube through the PC; the library part is filtered locally by the view.
-    func search(_ q: String) async throws -> (inLibrary: [Track], found: [Candidate]) {
+    /// Search on YouTube: straight from the phone to YouTube Music (~0.5 s, PC off is fine),
+    /// through the PC only if that fails. Same query again = instant. The library part is
+    /// filtered locally by the view.
+    func search(_ q: String) async throws -> [Candidate] {
+        let key = q.lowercased()
+        if let hit = searched[key] { return hit }
+        let found: [Candidate]
+        do { found = try await YouTubeSearch.songs(q) } catch { found = try await searchOnPC(q) }
+        if searched.count > 60 { searched = [:] }
+        searched[key] = found
+        return found
+    }
+
+    private var searched: [String: [Candidate]] = [:]
+
+    private func searchOnPC(_ q: String) async throws -> [Candidate] {
         let o = try await MusicAPI.json(MusicAPI.request("/api/musica/cerca", body: ["q": q, "n": 15], timeout: 40))
-        let lib = (o["risultati"] as? [[String: Any]] ?? []).compactMap(Track.init(json:))
-        let found: [Candidate] = (o["trovati"] as? [[String: Any]] ?? []).compactMap { c in
+        return (o["trovati"] as? [[String: Any]] ?? []).compactMap { c in
             guard let id = c["id"] as? String else { return nil }
             return Candidate(id: id, title: (c["titolo"] as? String) ?? id, channel: (c["canale"] as? String) ?? "",
                              duration: Track.num(c["durata"]), thumb: (c["thumb"] as? String) ?? "")
         }
-        return (lib, found)
     }
 
     /// Adds a YouTube video to the library (the PC downloads it; slow).
@@ -350,7 +363,7 @@ final class MusicStore: ObservableObject {
         done += 1
         note = nil
         settle()
-        Task { _ = await Covers.shared.load(t) }
+        Task { _ = await Covers.shared.fetch(t) }
     }
 
     /// Network cut or PC gone: the id stays queued, the next refresh sends it again.
@@ -388,7 +401,7 @@ final class MusicStore: ObservableObject {
     private func prefetchCovers() async {
         for t in tracks where !t.cover.isEmpty && !Covers.shared.onDisk(t) {
             guard online else { return }
-            _ = await Covers.shared.load(t)
+            _ = await Covers.shared.fetch(t)
         }
         scan()
     }
@@ -405,41 +418,72 @@ final class MusicStore: ObservableObject {
     }
 }
 
-/// Covers: memory, then Music/cover, then the network (and then disk).
+/// Decoded covers, at the size they are drawn (a 48 pt row never holds a 1280 px image).
+/// A global so a view's body can read it synchronously: no placeholder flash on a cached cover.
+let coverMemory: NSCache<NSString, UIImage> = {
+    let c = NSCache<NSString, UIImage>()
+    c.totalCostLimit = 48 << 20
+    return c
+}()
+
+/// Pixel bucket for a cover drawn `pt` points wide: few buckets, so one decode serves many views.
+func coverPixels(_ pt: CGFloat) -> Int {
+    let px = pt * 3
+    return px <= 160 ? 160 : px <= 480 ? 480 : 900
+}
+
+func coverKey(_ id: String, _ px: Int) -> NSString { "\(id)@\(px)" as NSString }
+
+/// Covers: memory, then Music/cover (decoded off the main thread, downsampled), then the network.
 @MainActor
 final class Covers {
     static let shared = Covers()
-    private let cache = NSCache<NSString, UIImage>()
-    private var inflight: [String: Task<UIImage?, Never>] = [:]
+    private var inflight: [String: Task<Bool, Never>] = [:]
 
     func url(_ t: Track) -> URL { Disk.cover.appendingPathComponent(t.coverName) }
     func onDisk(_ t: Track) -> Bool { FileManager.default.fileExists(atPath: url(t).path) }
 
-    func cached(_ t: Track) -> UIImage? {
-        if let i = cache.object(forKey: t.id as NSString) { return i }
-        guard let i = UIImage(contentsOfFile: url(t).path) else { return nil }
-        cache.setObject(i, forKey: t.id as NSString)
-        return i
+    func cached(_ t: Track, px: Int = 900) -> UIImage? { coverMemory.object(forKey: coverKey(t.id, px)) }
+
+    func load(_ t: Track, px: Int = 900) async -> UIImage? {
+        if let i = cached(t, px: px) { return i }
+        if !onDisk(t) { guard await fetch(t) else { return nil } }
+        let src = url(t)
+        guard let img = await Task.detached(priority: .userInitiated, operation: { Covers.decode(src, px: px) }).value else { return nil }
+        coverMemory.setObject(img, forKey: coverKey(t.id, px), cost: Int(img.size.width * img.size.height * 4))
+        return img
     }
 
-    func load(_ t: Track) async -> UIImage? {
-        if let i = cached(t) { return i }
-        guard !t.cover.isEmpty, Auth.signedIn else { return nil }
+    /// The cover on disk (downloaded once from the PC); no decoding.
+    func fetch(_ t: Track) async -> Bool {
+        if onDisk(t) { return true }
+        guard !t.cover.isEmpty, Auth.signedIn else { return false }
         if let job = inflight[t.id] { return await job.value }
         let dst = url(t)
         let req = MusicAPI.get(MusicAPI.fileURL(t.cover), timeout: 20)
-        let job = Task<UIImage?, Never> {
+        let job = Task.detached(priority: .utility) { () -> Bool in
             guard let r = try? await MusicAPI.session.data(for: req),
-                  (r.1 as? HTTPURLResponse)?.statusCode == 200, let img = UIImage(data: r.0) else { return nil }
-            let d = r.0
-            try? d.write(to: dst, options: .atomic)
+                  (r.1 as? HTTPURLResponse)?.statusCode == 200, !r.0.isEmpty,
+                  (try? r.0.write(to: dst, options: .atomic)) != nil else { return false }
             Disk.exclude(dst)
-            return img
+            return true
         }
         inflight[t.id] = job
-        let img = await job.value
+        let ok = await job.value
         inflight[t.id] = nil
-        if let img = img { cache.setObject(img, forKey: t.id as NSString) }
-        return img
+        return ok
+    }
+
+    /// ImageIO thumbnail: decoded straight to `px` on the longest side, ready to draw.
+    nonisolated static func decode(_ u: URL, px: Int) -> UIImage? {
+        guard let src = CGImageSourceCreateWithURL(u as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+        let o: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: px,
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, o as CFDictionary) else { return nil }
+        return UIImage(cgImage: cg)
     }
 }

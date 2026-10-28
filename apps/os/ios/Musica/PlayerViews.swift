@@ -33,14 +33,7 @@ struct MiniPlayer: View {
                 Rectangle().fill(.ultraThinMaterial).opacity(0.6)
             }
         }
-        .overlay(alignment: .bottom) {
-            GeometryReader { g in
-                Capsule().fill(Brand.fg.opacity(0.85))
-                    .frame(width: g.size.width * CGFloat(player.duration > 0 ? min(player.time / player.duration, 1) : 0), height: 2)
-            }
-            .frame(height: 2)
-            .padding(.horizontal, 14)
-        }
+        .overlay(alignment: .bottom) { MiniProgress(clock: player.clock, duration: player.duration).frame(height: 2).padding(.horizontal, 14) }
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Brand.line, lineWidth: 0.5))
         .shadow(color: .black.opacity(0.45), radius: 16, y: 6)
@@ -48,6 +41,20 @@ struct MiniPlayer: View {
         .contentShape(Rectangle())
         .onTapGesture { player.full = true }
         .gesture(DragGesture(minimumDistance: 20).onEnded { v in if v.translation.height < -30 { player.full = true } })
+    }
+}
+
+/// The mini player's progress line: the only thing that ticks, so only it redraws.
+private struct MiniProgress: View {
+    @ObservedObject var clock: PlayerClock
+    let duration: Double
+
+    var body: some View {
+        let dur = duration
+        GeometryReader { g in
+            Capsule().fill(Brand.fg.opacity(0.85))
+                .frame(width: g.size.width * CGFloat(dur > 0 ? min(clock.time / dur, 1) : 0), height: 2)
+        }
     }
 }
 
@@ -100,7 +107,7 @@ struct FullPlayer: View {
                     }
                 }
                 .padding(.horizontal, 28)
-                Scrubber().padding(.horizontal, 28).padding(.top, 20)
+                Scrubber(clock: player.clock).padding(.horizontal, 28).padding(.top, 20)
                 HStack {
                     Button { Haptic.tap(); player.setShuffle(!player.shuffle) } label: {
                         Image(systemName: "shuffle").font(.system(size: 18, weight: .semibold))
@@ -157,11 +164,12 @@ struct FullPlayer: View {
 /// The time bar: a thin line that grows under the finger, the times beneath it.
 struct Scrubber: View {
     @EnvironmentObject private var player: MusicPlayer
+    @ObservedObject var clock: PlayerClock
     @State private var scrub: Double?
 
     var body: some View {
         let dur = max(player.duration, 1)
-        let now = scrub ?? player.time
+        let now = scrub ?? clock.time
         VStack(spacing: 7) {
             GeometryReader { g in
                 let w = g.size.width

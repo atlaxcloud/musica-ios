@@ -19,6 +19,12 @@ private struct SavedQueue: Codable {
     var repeatMode: String
 }
 
+/// The playback position, alone: only the progress bars observe it.
+@MainActor
+final class PlayerClock: ObservableObject {
+    @Published var time: Double = 0
+}
+
 @MainActor
 final class MusicPlayer: ObservableObject {
     static let shared = MusicPlayer()
@@ -30,7 +36,10 @@ final class MusicPlayer: ObservableObject {
     @Published private(set) var queue: [String] = []
     @Published private(set) var index = 0
     @Published private(set) var playing = false
-    @Published private(set) var time: Double = 0
+    /// Not published: it ticks twice a second and would redraw every list holding the player.
+    /// The few views that show it watch `clock`.
+    private(set) var time: Double = 0 { didSet { if clock.time != time { clock.time = time } } }
+    let clock = PlayerClock()
     @Published private(set) var duration: Double = 0
     @Published private(set) var shuffle = false
     @Published var repeatMode: Repeat = .off { didSet { save(); prepareNext() } }

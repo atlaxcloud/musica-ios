@@ -7,14 +7,18 @@ enum Haptic {
     static func ok() { UINotificationFeedbackGenerator().notificationOccurred(.success) }
 }
 
-/// A track's cover: memory, then the phone, then the network.
+/// A track's cover: memory (read in the body, so a cached cover never flashes), then the phone
+/// decoded off the main thread at the drawn size, then the network.
 struct CoverView: View {
     let track: Track?
     var size: CGFloat = 46
     var radius: CGFloat = Brand.r.small
-    @State private var img: UIImage?
+    @State private var loaded: UIImage?
+    @State private var loadedId: String?
 
     var body: some View {
+        let px = coverPixels(size)
+        let img = track.flatMap { t in (loadedId == t.id ? loaded : nil) ?? coverMemory.object(forKey: coverKey(t.id, px)) }
         ZStack {
             Rectangle().fill(Brand.raised)
             if let img = img {
@@ -28,9 +32,9 @@ struct CoverView: View {
         .frame(width: size, height: size)
         .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
         .task(id: track?.id) {
-            guard let t = track else { img = nil; return }
-            img = Covers.shared.cached(t)
-            if img == nil { img = await Covers.shared.load(t) }
+            guard let t = track, Covers.shared.cached(t, px: px) == nil else { return }
+            let i = await Covers.shared.load(t, px: px)
+            if !Task.isCancelled { loaded = i; loadedId = t.id }
         }
     }
 }
@@ -243,8 +247,9 @@ struct Backdrop: View {
         .animation(.easeOut(duration: 0.5), value: img)
         .task(id: track?.id) {
             guard let t = track else { img = nil; return }
-            img = Covers.shared.cached(t)
-            if img == nil { img = await Covers.shared.load(t) }
+            // Blurred to death: a small decode is all it needs.
+            img = Covers.shared.cached(t, px: 160)
+            if img == nil { img = await Covers.shared.load(t, px: 160) }
         }
     }
 }
