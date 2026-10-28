@@ -1,63 +1,74 @@
-// Musica: the mini player docked at the bottom, the full player, the queue.
+// Musica: the mini player floating with the dock, the full player, the queue.
 import AVKit
 import SwiftUI
 
+/// A capsule like the dock: round cover, title, play/pause inside a ring of progress.
+/// Folded (next to the folded dock) it keeps only the cover, the title and the ring.
 struct MiniPlayer: View {
     @EnvironmentObject private var player: MusicPlayer
+    let compact: Bool
 
     var body: some View {
         let t = player.current
-        HStack(spacing: 12) {
-            CoverView(track: t, size: 40, radius: 7)
+        let h = compact ? Bar.folded : Bar.open
+        let side = h - 14
+        HStack(spacing: 10) {
+            CoverView(track: t, size: side, radius: side / 2)
             VStack(alignment: .leading, spacing: 1) {
-                Text(t?.title ?? "").font(.system(size: 14.5, weight: .semibold)).lineLimit(1)
-                Text(t?.artist ?? "").font(.system(size: 12.5)).foregroundColor(Brand.dim).lineLimit(1)
+                Text(t?.title ?? "").font(.system(size: 14, weight: .semibold)).lineLimit(1)
+                if !compact {
+                    Text(t?.artist ?? "").font(.system(size: 12)).foregroundColor(Brand.dim).lineLimit(1)
+                        .transition(.opacity)
+                }
             }
-            Spacer(minLength: 6)
+            Spacer(minLength: 2)
             Button { Haptic.tap(); player.toggle() } label: {
-                Image(systemName: player.playing ? "pause.fill" : "play.fill").font(.system(size: 21)).frame(width: 42, height: 42)
+                ZStack {
+                    Ring(clock: player.clock, duration: player.duration)
+                    Image(systemName: player.playing ? "pause.fill" : "play.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .offset(x: player.playing ? 0 : 1)
+                }
+                .frame(width: 34, height: 34)
+                .frame(width: 44, height: 44)
             }
             .buttonStyle(Press())
-            Button { Haptic.tap(); player.next() } label: {
-                Image(systemName: "forward.fill").font(.system(size: 18)).frame(width: 38, height: 42)
+            if !compact {
+                Button { Haptic.tap(); player.next() } label: {
+                    Image(systemName: "forward.fill").font(.system(size: 16)).frame(width: 40, height: 44)
+                }
+                .buttonStyle(Press())
+                .transition(.opacity.combined(with: .scale(scale: 0.6)))
             }
-            .buttonStyle(Press())
         }
-        .padding(.leading, 8)
-        .padding(.trailing, 6)
-        .padding(.vertical, 7)
+        .padding(.leading, 7)
+        .padding(.trailing, compact ? 3 : 8)
+        .frame(height: h)
         .foregroundColor(Brand.fg)
-        .background {
-            ZStack {
-                Backdrop(track: t, fade: false)
-                Rectangle().fill(.ultraThinMaterial).opacity(0.6)
-            }
-        }
-        .overlay(alignment: .bottom) { MiniProgress(clock: player.clock, duration: player.duration).frame(height: 2).padding(.horizontal, 14) }
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Brand.line, lineWidth: 0.5))
-        .shadow(color: .black.opacity(0.45), radius: 16, y: 6)
-        .padding(.horizontal, 10)
-        .contentShape(Rectangle())
+        .background(Glass())
+        .contentShape(Capsule(style: .continuous))
         .onTapGesture { player.full = true }
         .gesture(DragGesture(minimumDistance: 20).onEnded { v in if v.translation.height < -30 { player.full = true } })
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(t.map { "\($0.title), \($0.artist)" } ?? "")
     }
 }
 
-/// The mini player's progress line: the only thing that ticks, so only it redraws.
-private struct MiniProgress: View {
+/// The progress around the play button: the only thing that ticks, so only it redraws.
+private struct Ring: View {
     @ObservedObject var clock: PlayerClock
     let duration: Double
 
     var body: some View {
-        let dur = duration
-        GeometryReader { g in
-            Capsule().fill(Brand.fg.opacity(0.85))
-                .frame(width: g.size.width * CGFloat(dur > 0 ? min(clock.time / dur, 1) : 0), height: 2)
+        let p = duration > 0 ? min(max(clock.time / duration, 0), 1) : 0
+        ZStack {
+            Circle().stroke(Brand.fg.opacity(0.16), lineWidth: 2)
+            Circle().trim(from: 0, to: CGFloat(p))
+                .stroke(Brand.fg, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                .rotationEffect(.degrees(-90))
         }
     }
 }
-
 struct FullPlayer: View {
     @EnvironmentObject private var store: MusicStore
     @EnvironmentObject private var player: MusicPlayer
@@ -71,41 +82,38 @@ struct FullPlayer: View {
             VStack(spacing: 0) {
                 HStack {
                     Button { player.full = false } label: {
-                        Image(systemName: "chevron.down").font(.system(size: 17, weight: .bold)).frame(width: 44, height: 44)
+                        Image(systemName: "chevron.down")
+                            .font(.system(size: 15, weight: .bold))
+                            .frame(width: 36, height: 36)
+                            .background(Circle().fill(Brand.fg.opacity(0.1)))
+                            .frame(width: 44, height: 44)
                     }
                     .buttonStyle(Press())
                     Spacer()
-                    if let t = t, !store.isDownloaded(t.id) {
-                        Label(store.online ? "Dal PC" : "Non scaricato", systemImage: "icloud")
-                            .font(.system(size: 11.5, weight: .semibold)).foregroundColor(Brand.dim)
-                    }
+                    Capsule().fill(Brand.fg.opacity(0.25)).frame(width: 36, height: 5)
                     Spacer()
-                    Button { showQueue = true } label: {
-                        Image(systemName: "list.bullet").font(.system(size: 17, weight: .semibold)).frame(width: 44, height: 44)
+                    Menu {
+                        if let t = t { TrackMenu(track: t, playlist: nil) }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 15, weight: .bold))
+                            .frame(width: 36, height: 36)
+                            .background(Circle().fill(Brand.fg.opacity(0.1)))
+                            .frame(width: 44, height: 44)
                     }
-                    .buttonStyle(Press())
                 }
-                .padding(.horizontal, 14)
+                .padding(.horizontal, 16)
                 Spacer(minLength: 10)
                 CoverView(track: t, size: max(side, 120), radius: Brand.r.card)
                     .shadow(color: .black.opacity(0.55), radius: 30, y: 16)
                     .scaleEffect(player.playing ? 1 : 0.86)
                     .animation(.spring(response: 0.45, dampingFraction: 0.75), value: player.playing)
                 Spacer(minLength: 22)
-                HStack(alignment: .center, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(t?.title ?? "").font(.system(size: 22, weight: .bold)).lineLimit(1)
-                        Text(t?.artist ?? "").font(.system(size: 17)).foregroundColor(Brand.dim).lineLimit(1)
-                    }
-                    Spacer(minLength: 0)
-                    Menu {
-                        if let t = t { TrackMenu(track: t, playlist: nil) }
-                    } label: {
-                        Image(systemName: "ellipsis").font(.system(size: 16, weight: .bold))
-                            .frame(width: 34, height: 34)
-                            .background(Circle().fill(Brand.raised))
-                    }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(t?.title ?? "").font(.system(size: 23, weight: .bold)).lineLimit(1)
+                    Text(t?.artist ?? "").font(.system(size: 17)).foregroundColor(Brand.dim).lineLimit(1)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 28)
                 Scrubber(clock: player.clock).padding(.horizontal, 28).padding(.top, 20)
                 HStack {
@@ -142,6 +150,17 @@ struct FullPlayer: View {
                 HStack {
                     RoutePicker().frame(width: 44, height: 44)
                     Spacer()
+                    if let t = t, !store.isDownloaded(t.id) {
+                        Label(store.online ? "Dal PC" : "Non scaricato", systemImage: "icloud")
+                            .font(.system(size: 12, weight: .semibold)).foregroundColor(Brand.dim)
+                    }
+                    Spacer()
+                    Button { Haptic.tap(); showQueue = true } label: {
+                        Image(systemName: "list.bullet").font(.system(size: 17, weight: .semibold))
+                            .foregroundColor(Brand.dim)
+                            .frame(width: 44, height: 44)
+                    }
+                    .buttonStyle(Press())
                 }
                 .padding(.horizontal, 24)
                 .padding(.bottom, 6)

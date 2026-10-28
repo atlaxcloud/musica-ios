@@ -18,12 +18,14 @@ struct MusicaApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var store = MusicStore.shared
     @StateObject private var player = MusicPlayer.shared
+    @StateObject private var dock = DockState.shared
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(store)
                 .environmentObject(player)
+                .environmentObject(dock)
                 .preferredColorScheme(.dark)
                 .tint(Brand.fg)
         }

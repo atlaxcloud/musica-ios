@@ -1,6 +1,7 @@
-// Musica: the screens. Three tabs (Ascolta, Playlist, Cerca) in a bar of our own,
-// the mini player floating above it, the full player over everything.
+// Musica: the screens. Three tabs (Ascolta, Playlist, Cerca), each with its own stack,
+// under the floating dock and mini player (Dock.swift); the full player over everything.
 import SwiftUI
+import UIKit
 
 enum Pane: String, CaseIterable, Identifiable {
     case home = "Ascolta", playlists = "Playlist", search = "Cerca"
@@ -24,34 +25,41 @@ enum Pane: String, CaseIterable, Identifiable {
 struct RootView: View {
     @EnvironmentObject private var store: MusicStore
     @EnvironmentObject private var player: MusicPlayer
+    @EnvironmentObject private var dock: DockState
     @Environment(\.scenePhase) private var phase
     @AppStorage("musica.tab") private var tab = Pane.home.rawValue
     @State private var login = false
-    @State private var barH: CGFloat = 120
+    @State private var paths: [Pane: NavigationPath] = [:]
+    @State private var keyboard = false
 
     var body: some View {
         let pane = Pane(rawValue: tab) ?? .home
+        // Reserved under every screen: the open bar (it only gets smaller when folded),
+        // a constant so the lists never jump while the dock folds.
+        let inset = Bar.open + (player.current != nil ? Bar.open + Bar.gap : 0)
         ZStack {
             Brand.bg.ignoresSafeArea()
             // Every tab keeps its own stack (and its scroll) while you switch.
             ForEach(Pane.allCases) { p in
-                NavigationStack { screen(p).underBar() }
-                    .environment(\.barInset, barH)
+                NavigationStack(path: path(p)) { screen(p).underBar() }
+                    .environment(\.barInset, inset)
                     .opacity(p == pane ? 1 : 0)
                     .allowsHitTesting(p == pane)
+                    .accessibilityHidden(p != pane)
             }
         }
-        // Floating over the lists; each screen reserves its height (underBar), so the last
-        // row scrolls up clear of it instead of ending underneath.
         .overlay(alignment: .bottom) {
-            VStack(spacing: 6) {
-                if player.current != nil { MiniPlayer().transition(.move(edge: .bottom).combined(with: .opacity)) }
-                TabBar(tab: $tab)
-            }
-            .animation(.spring(response: 0.35, dampingFraction: 0.86), value: player.current?.id)
-            .background(GeometryReader { g in Color.clear.preference(key: BarHeight.self, value: g.size.height) })
+            BottomBar(tab: $tab, reselect: reselect)
+                .padding(.bottom, 2)
+                // Typing: the keyboard has the bottom, the bar steps aside.
+                .opacity(keyboard ? 0 : 1)
+                .offset(y: keyboard ? 30 : 0)
+                .allowsHitTesting(!keyboard)
+                .animation(.easeOut(duration: 0.2), value: keyboard)
         }
-        .onPreferenceChange(BarHeight.self) { barH = $0 }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in keyboard = true }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in keyboard = false }
+        .onChange(of: tab) { _ in dock.set(false) }
         .fullScreenCover(isPresented: $player.full) { FullPlayer() }
         .sheet(isPresented: $login) { LoginSheet() }
         .onAppear { if store.needsLogin && store.online { login = true } }
@@ -69,70 +77,23 @@ struct RootView: View {
         }
     }
 
+    private func path(_ p: Pane) -> Binding<NavigationPath> {
+        Binding(get: { paths[p] ?? NavigationPath() }, set: { paths[p] = $0 })
+    }
+
+    /// The tab already open, tapped again: back to its first screen.
+    private func reselect(_ p: Pane) {
+        Haptic.tap()
+        if let n = paths[p], !n.isEmpty { paths[p] = NavigationPath() }
+        dock.set(false)
+    }
+
     @ViewBuilder private func screen(_ p: Pane) -> some View {
         switch p {
         case .home: HomeView(login: $login)
         case .playlists: PlaylistsView()
         case .search: SearchView()
         }
-    }
-}
-
-private struct BarHeight: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
-}
-
-private struct BarInsetKey: EnvironmentKey { static let defaultValue: CGFloat = 0 }
-
-extension EnvironmentValues {
-    /// Height of the floating mini player + tab bar.
-    var barInset: CGFloat {
-        get { self[BarInsetKey.self] }
-        set { self[BarInsetKey.self] = newValue }
-    }
-}
-
-private struct UnderBar: ViewModifier {
-    @Environment(\.barInset) private var h
-    func body(content: Content) -> some View {
-        content.safeAreaInset(edge: .bottom, spacing: 0) { Color.clear.frame(height: h + 8) }
-    }
-}
-
-extension View {
-    /// A screen under the floating bar: its scroll ends above it.
-    func underBar() -> some View { modifier(UnderBar()) }
-}
-
-/// The bottom bar: three icons with their names, on glass, the selected one white.
-struct TabBar: View {
-    @Binding var tab: String
-
-    var body: some View {
-        HStack(spacing: 0) {
-            ForEach(Pane.allCases) { p in
-                let on = tab == p.rawValue
-                Button {
-                    if !on { Haptic.tap() }
-                    tab = p.rawValue
-                } label: {
-                    VStack(spacing: 3) {
-                        Image(systemName: on ? p.iconOn : p.icon).font(.system(size: 20, weight: on ? .semibold : .regular))
-                        Text(p.rawValue).font(.system(size: 10.5, weight: .medium))
-                    }
-                    .foregroundColor(on ? Brand.fg : Brand.faint)
-                    .frame(maxWidth: .infinity)
-                    .padding(.top, 8)
-                    .padding(.bottom, 2)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .background(.ultraThinMaterial)
-        .background(Brand.bg.opacity(0.55))
-        .overlay(Rectangle().fill(Brand.line).frame(height: 0.5), alignment: .top)
     }
 }
 
@@ -143,47 +104,64 @@ struct HomeView: View {
     @EnvironmentObject private var player: MusicPlayer
     @Binding var login: Bool
     @State private var confirmWipe = false
+    @State private var q = ""
+    @State private var found: [Track] = []
+    @FocusState private var focused: Bool
 
     var body: some View {
-        let ids = store.tracks.map(\.id)
+        let searching = !q.trimmingCharacters(in: .whitespaces).isEmpty
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                Banner(login: $login).padding(.horizontal, 20).padding(.bottom, 14)
+                SearchField(prompt: "Cerca nei tuoi brani", text: $q, focus: $focused)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 14)
                 if store.tracks.isEmpty {
+                    Banner(login: $login).padding(.horizontal, 20)
                     Empty(text: store.loading ? "Carico la libreria…" : "La libreria è vuota.\nCerca un brano per aggiungerlo.")
-                        .padding(.top, 60)
+                        .padding(.top, 50)
+                } else if searching {
+                    if found.isEmpty {
+                        Empty(text: "Nessun brano trovato.").padding(.top, 30)
+                    } else {
+                        SectionTitle(text: "Risultati", trailing: "\(found.count)").padding(.top, 6).padding(.bottom, 2)
+                        rows(found)
+                    }
                 } else {
+                    Banner(login: $login).padding(.horizontal, 20).padding(.bottom, 14)
                     HStack(spacing: 10) {
-                        Button { player.play(ids, shuffled: true) } label: { Label("Casuale", systemImage: "shuffle") }.buttonStyle(Pill())
-                        Button { player.play(ids) } label: { Label("Riproduci", systemImage: "play.fill") }.buttonStyle(Pill(filled: false))
+                        Button { player.play(store.tracks.map(\.id), shuffled: true) } label: { Label("Casuale", systemImage: "shuffle") }.buttonStyle(Pill())
+                        Button { player.play(store.tracks.map(\.id)) } label: { Label("Riproduci", systemImage: "play.fill") }.buttonStyle(Pill(filled: false))
                     }
                     .padding(.horizontal, 20)
                     if !store.playlists.isEmpty {
-                        SectionTitle(text: "Le tue playlist").padding(.top, 28)
+                        SectionTitle(text: "Le tue playlist").padding(.top, 30)
                         ScrollView(.horizontal, showsIndicators: false) {
                             LazyHStack(alignment: .top, spacing: 14) {
                                 ForEach(store.playlists) { p in
-                                    NavigationLink(value: p.name) { PlaylistCard(playlist: p, side: 150) }.buttonStyle(Press())
+                                    NavigationLink(value: p.name) { PlaylistCard(playlist: p, side: 148) }.buttonStyle(Press())
                                 }
                             }
                             .padding(.horizontal, 20)
                         }
                     }
-                    SectionTitle(text: "Tutti i brani", trailing: "\(store.tracks.count)").padding(.top, 28).padding(.bottom, 4)
-                    ForEach(Array(store.tracks.enumerated()), id: \.element.id) { i, t in
-                        TrackRow(track: t) { player.play(ids, from: i) }
-                            .padding(.horizontal, 20)
-                    }
+                    SectionTitle(text: "Tutti i brani", trailing: "\(store.tracks.count)").padding(.top, 30).padding(.bottom, 2)
+                    rows(store.tracks)
                     Footer(text: store.syncedAt.map { "Aggiornata alle " + $0.formatted(date: .omitted, time: .shortened) } ?? "")
                         .padding(.top, 8)
                 }
             }
             .padding(.bottom, 24)
+            .dockScroll()
         }
+        .scrollDismissesKeyboard(.immediately)
         .refreshable { await store.refresh() }
         .background(Brand.bg)
         .navigationTitle("Musica")
+        .navigationBarTitleDisplayMode(.large)
         .navigationDestination(for: String.self) { PlaylistView(name: $0).underBar() }
+        // Filtered once per keystroke (or per library change), never on unrelated redraws.
+        .onChange(of: q) { _ in refilter() }
+        .onChange(of: store.tracks) { _ in refilter() }
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
@@ -197,13 +175,28 @@ struct HomeView: View {
                         Button(role: .destructive) { store.signOut() } label: { Label("Esci", systemImage: "rectangle.portrait.and.arrow.right") }
                     }
                 } label: {
-                    Image(systemName: store.loading ? "arrow.triangle.2.circlepath" : "ellipsis.circle")
-                        .font(.system(size: 17, weight: .medium))
+                    Image(systemName: store.loading ? "arrow.triangle.2.circlepath" : "ellipsis")
+                        .font(.system(size: 15, weight: .bold))
+                        .frame(width: 32, height: 32)
+                        .background(Circle().fill(Brand.raised))
                 }
             }
         }
         .confirmationDialog("Togliere i brani dal telefono? Si riscaricano col prossimo aggiornamento.", isPresented: $confirmWipe, titleVisibility: .visible) {
             Button("Togli tutti", role: .destructive) { store.deleteAll() }
+        }
+    }
+
+    private func refilter() {
+        let n = q.trimmingCharacters(in: .whitespaces)
+        found = n.isEmpty ? [] : Search.filter(store.tracks, n)
+    }
+
+    /// Tap plays this very list (all songs, or what the search left) from that song.
+    @ViewBuilder private func rows(_ ts: [Track]) -> some View {
+        ForEach(Array(ts.enumerated()), id: \.element.id) { i, t in
+            TrackRow(track: t) { player.play(ts.map(\.id), from: i) }
+                .padding(.horizontal, 20)
         }
     }
 }
@@ -223,7 +216,7 @@ struct Banner: View {
                     Button("Accedi") { login = true }.buttonStyle(Pill()).frame(width: 96)
                 }
                 .padding(14)
-                .background(RoundedRectangle(cornerRadius: Brand.r.tile, style: .continuous).fill(Brand.surface))
+                .background(RoundedRectangle(cornerRadius: Brand.r.card, style: .continuous).fill(Brand.surface))
             } else {
                 Status()
             }
@@ -233,7 +226,7 @@ struct Banner: View {
     }
 }
 
-/// One quiet line: is the phone self-sufficient, is it filling up, is it offline. No box, no colour.
+/// One quiet line: is the phone self-sufficient, is it filling up, is it offline. No box.
 struct Status: View {
     @EnvironmentObject private var store: MusicStore
 
@@ -287,8 +280,8 @@ struct Note: View {
             Spacer(minLength: 0)
         }
         .foregroundColor(Brand.dim)
-        .padding(.horizontal, 12).padding(.vertical, 9)
-        .background(RoundedRectangle(cornerRadius: Brand.r.small, style: .continuous).fill(Brand.surface))
+        .padding(.horizontal, 14).padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: Brand.r.tile, style: .continuous).fill(Brand.surface))
     }
 }
 
@@ -302,26 +295,35 @@ struct PlaylistsView: View {
 
     var body: some View {
         ScrollView {
-            if store.playlists.isEmpty {
-                Empty(text: "Nessuna playlist.").padding(.top, 80)
-            } else {
-                LazyVGrid(columns: cols, alignment: .leading, spacing: 22) {
-                    ForEach(store.playlists) { p in
-                        NavigationLink(value: p.name) { PlaylistCard(playlist: p, side: nil) }.buttonStyle(Press())
+            VStack(spacing: 0) {
+                if store.playlists.isEmpty {
+                    Empty(text: "Nessuna playlist.\nTocca + per crearne una.").padding(.top, 80)
+                } else {
+                    LazyVGrid(columns: cols, alignment: .leading, spacing: 24) {
+                        ForEach(store.playlists) { p in
+                            NavigationLink(value: p.name) { PlaylistCard(playlist: p, side: nil) }.buttonStyle(Press())
+                        }
                     }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 6)
+                    .padding(.bottom, 24)
                 }
-                .padding(.horizontal, 20)
-                .padding(.top, 6)
-                .padding(.bottom, 24)
             }
+            .dockScroll()
         }
         .refreshable { await store.refresh() }
         .background(Brand.bg)
         .navigationTitle("Playlist")
+        .navigationBarTitleDisplayMode(.large)
         .navigationDestination(for: String.self) { PlaylistView(name: $0).underBar() }
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
-                Button { name = ""; naming = true } label: { Image(systemName: "plus").font(.system(size: 17, weight: .semibold)) }
+                Button { name = ""; naming = true } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 15, weight: .bold))
+                        .frame(width: 32, height: 32)
+                        .background(Circle().fill(Brand.raised))
+                }
             }
         }
         .alert("Nuova playlist", isPresented: $naming) {
@@ -329,7 +331,7 @@ struct PlaylistsView: View {
             Button("Annulla", role: .cancel) {}
             Button("Crea") {
                 let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !n.isEmpty && store.playlist(n) == nil { store.savePlaylist(n, []) }
+                if !n.isEmpty && store.playlist(n) == nil { store.savePlaylist(n, []); Haptic.ok() }
             }
         }
     }
@@ -343,12 +345,12 @@ struct PlaylistCard: View {
     let side: CGFloat?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 9) {
             Group {
                 if let s = side {
-                    Mosaic(ids: playlist.ids, radius: Brand.r.tile).frame(width: s, height: s)
+                    Mosaic(ids: playlist.ids, radius: Brand.r.card).frame(width: s, height: s)
                 } else {
-                    Mosaic(ids: playlist.ids, radius: Brand.r.tile).aspectRatio(1, contentMode: .fit)
+                    Mosaic(ids: playlist.ids, radius: Brand.r.card).aspectRatio(1, contentMode: .fit)
                 }
             }
             VStack(alignment: .leading, spacing: 2) {
@@ -367,16 +369,26 @@ struct PlaylistView: View {
     let name: String
     @State private var confirmDelete = false
     @State private var editing = false
+    @State private var q = ""
+    @FocusState private var focused: Bool
 
     var body: some View {
         let p = store.playlist(name) ?? Playlist(name: name, ids: [])
         let ts = store.tracks(of: p)
         let ids = ts.map(\.id)
+        let needle = q.trimmingCharacters(in: .whitespaces)
+        let shown = needle.isEmpty ? ts : Search.filter(ts, needle)
         let minutes = Int(ts.reduce(0) { $0 + $1.duration } / 60)
+        // Reordering only makes sense on the whole playlist, not on a filtered slice.
+        let mover: ((IndexSet, Int) -> Void)? = needle.isEmpty ? { from, to in
+            var next = ids
+            next.move(fromOffsets: from, toOffset: to)
+            store.savePlaylist(name, next)
+        } : nil
         List {
             VStack(spacing: 18) {
                 Mosaic(ids: p.ids, radius: Brand.r.card)
-                    .frame(width: 236, height: 236)
+                    .frame(width: 220, height: 220)
                     .shadow(color: .black.opacity(0.55), radius: 26, y: 14)
                 VStack(spacing: 4) {
                     Text(name).font(.system(size: 26, weight: .bold)).multilineTextAlignment(.center).lineLimit(2)
@@ -388,35 +400,48 @@ struct PlaylistView: View {
                     Button { player.play(ids) } label: { Label("Riproduci", systemImage: "play.fill") }.buttonStyle(Pill())
                     Button { player.play(ids, shuffled: true) } label: { Label("Casuale", systemImage: "shuffle") }.buttonStyle(Pill(filled: false))
                 }
+                if ts.count > 1 {
+                    SearchField(prompt: "Cerca nella playlist", text: $q, focus: $focused)
+                }
             }
             .frame(maxWidth: .infinity)
             .padding(.top, 4)
-            .padding(.bottom, 10)
+            .padding(.bottom, 8)
             .background(alignment: .top) { Backdrop(track: ts.first).frame(height: 420).offset(y: -160) }
+            .dockScroll()
             .listRowBackground(Color.clear)
             .listRowSeparator(.hidden)
             .listRowInsets(EdgeInsets(top: 0, leading: 20, bottom: 0, trailing: 20))
-            ForEach(Array(ts.enumerated()), id: \.element.id) { i, t in
-                TrackRow(track: t, playlist: name, number: i + 1) { player.play(ids, from: i) }.row()
+            ForEach(Array(shown.enumerated()), id: \.element.id) { i, t in
+                TrackRow(track: t, playlist: name, number: needle.isEmpty ? i + 1 : nil) {
+                    player.play(shown.map(\.id), from: i)
+                }
+                .row()
             }
-            .onDelete { offs in for o in offs { store.removeFrom(name, ts[o].id) } }
-            .onMove { from, to in
-                var next = ids
-                next.move(fromOffsets: from, toOffset: to)
-                store.savePlaylist(name, next)
+            .onDelete { offs in for o in offs where o < shown.count { store.removeFrom(name, shown[o].id) } }
+            .onMove(perform: mover)
+            if ts.isEmpty {
+                Empty(text: "Vuota. Tieni premuto un brano → Aggiungi a playlist.").row()
+            } else if shown.isEmpty {
+                Empty(text: "Nessun brano trovato.").row()
             }
-            if ts.isEmpty { Empty(text: "Vuota. Tieni premuto un brano → Aggiungi a playlist.").row() }
         }
         .page()
+        .scrollDismissesKeyboard(.immediately)
         .environment(\.editMode, .constant(editing ? .active : .inactive))
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
-                    Button { withAnimation { editing.toggle() } } label: { Label(editing ? "Fine" : "Riordina", systemImage: "arrow.up.arrow.down") }
+                    Button { q = ""; withAnimation { editing.toggle() } } label: { Label(editing ? "Fine" : "Riordina", systemImage: "arrow.up.arrow.down") }
                     Button(role: .destructive) { confirmDelete = true } label: { Label("Elimina playlist", systemImage: "trash") }
-                } label: { Image(systemName: editing ? "checkmark.circle.fill" : "ellipsis.circle").font(.system(size: 17, weight: .medium)) }
+                } label: {
+                    Image(systemName: editing ? "checkmark" : "ellipsis")
+                        .font(.system(size: 15, weight: .bold))
+                        .frame(width: 32, height: 32)
+                        .background(Circle().fill(Brand.raised))
+                }
             }
         }
         .confirmationDialog("Eliminare \(name)?", isPresented: $confirmDelete, titleVisibility: .visible) {
@@ -431,6 +456,7 @@ struct SearchView: View {
     @EnvironmentObject private var store: MusicStore
     @EnvironmentObject private var player: MusicPlayer
     @AppStorage("musica.q") private var q = ""
+    @State private var local: [Track] = []
     @State private var found: [Candidate] = []
     @State private var searching = false
     @State private var error: String?
@@ -439,37 +465,29 @@ struct SearchView: View {
 
     var body: some View {
         let needle = q.trimmingCharacters(in: .whitespaces)
-        let local = needle.isEmpty ? [] : store.tracks.filter {
-            $0.title.localizedCaseInsensitiveContains(needle) || $0.artist.localizedCaseInsensitiveContains(needle) || $0.album.localizedCaseInsensitiveContains(needle)
-        }
-        let ids = local.map(\.id)
         let have = Set(store.tracks.map(\.id))
         let fresh = found.filter { !have.contains($0.id) || store.adding.contains($0.id) }
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
-                HStack(spacing: 8) {
-                    Image(systemName: "magnifyingglass").foregroundColor(Brand.faint)
-                    TextField("Brani, artisti, YouTube", text: $q)
-                        .focused($focused)
-                        .submitLabel(.search)
-                        .autocorrectionDisabled()
-                        .onSubmit { focused = false; remote(needle) }
-                    if !q.isEmpty {
-                        Button { q = ""; found = [] } label: { Image(systemName: "xmark.circle.fill").foregroundColor(Brand.faint) }.buttonStyle(.plain)
-                    }
+                SearchField(prompt: "Brani, artisti, YouTube", text: $q, focus: $focused) {
+                    focused = false
+                    remote(needle)
                 }
-                .font(.system(size: 16))
-                .padding(.horizontal, 14).padding(.vertical, 11)
-                .background(RoundedRectangle(cornerRadius: Brand.r.tile, style: .continuous).fill(Brand.surface))
                 .padding(.horizontal, 20)
                 .padding(.bottom, 8)
                 if needle.isEmpty {
-                    Empty(text: "Cerca nella tua musica e su YouTube.\nTocca un risultato di YouTube: si aggiunge e parte.").padding(.top, 60)
+                    VStack(spacing: 10) {
+                        Image(systemName: "magnifyingglass").font(.system(size: 30, weight: .semibold)).foregroundColor(Brand.faint)
+                        Text("Cerca nella tua musica e su YouTube.\nTocca un risultato di YouTube: si aggiunge e parte.")
+                            .font(.system(size: 14)).foregroundColor(Brand.faint).multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 70)
                 }
                 if !local.isEmpty {
-                    SectionTitle(text: "Nella libreria", trailing: "\(local.count)").padding(.top, 14)
+                    SectionTitle(text: "Nella libreria", trailing: "\(local.count)").padding(.top, 16).padding(.bottom, 2)
                     ForEach(Array(local.enumerated()), id: \.element.id) { i, t in
-                        TrackRow(track: t) { player.play(ids, from: i) }.padding(.horizontal, 20)
+                        TrackRow(track: t) { player.play(local.map(\.id), from: i) }.padding(.horizontal, 20)
                     }
                 }
                 if !needle.isEmpty {
@@ -477,12 +495,12 @@ struct SearchView: View {
                         if !store.online {
                             Footer(text: "Offline: cerco solo nella libreria.")
                         } else if !fresh.isEmpty {
-                            SectionTitle(text: "Da YouTube", trailing: searching ? "…" : nil).padding(.top, 22)
+                            SectionTitle(text: "Da YouTube", trailing: searching ? "…" : nil).padding(.top, 24).padding(.bottom, 2)
                             ForEach(fresh) { c in CandidateRow(c: c).padding(.horizontal, 20) }
                         } else if searching {
                             HStack(spacing: 8) { ProgressView().controlSize(.small); Text("Cerco su YouTube…") }
                                 .font(.system(size: 13)).foregroundColor(Brand.dim)
-                                .frame(maxWidth: .infinity).padding(.vertical, 22)
+                                .frame(maxWidth: .infinity).padding(.vertical, 24)
                         } else if let e = error {
                             Footer(text: e)
                         }
@@ -490,10 +508,15 @@ struct SearchView: View {
                 }
             }
             .padding(.bottom, 24)
+            .dockScroll()
         }
-        .scrollDismissesKeyboard(.interactively)
+        .scrollDismissesKeyboard(.immediately)
         .background(Brand.bg)
         .navigationTitle("Cerca")
+        .navigationBarTitleDisplayMode(.large)
+        .onAppear { relocal() }
+        .onChange(of: q) { _ in relocal() }
+        .onChange(of: store.tracks) { _ in relocal() }
         // Opening Cerca with nothing typed: the keyboard is already up.
         .onChange(of: tab) { t in if t == Pane.search.rawValue && q.isEmpty { focused = true } }
         // YouTube as you type: a short pause after the last letter, the newest query wins.
@@ -503,6 +526,11 @@ struct SearchView: View {
             guard !Task.isCancelled else { return }
             remote(needle)
         }
+    }
+
+    private func relocal() {
+        let n = q.trimmingCharacters(in: .whitespaces)
+        local = n.isEmpty ? [] : Search.filter(store.tracks, n)
     }
 
     private func remote(_ needle: String) {
@@ -522,7 +550,7 @@ struct SearchView: View {
             case .failure(let e):
                 switch e as? MusicError {
                 case .auth?: error = "Serve l'accesso."
-                                default: error = "Ricerca non riuscita."
+                default: error = "Ricerca non riuscita."
                 }
             }
         }
@@ -542,7 +570,7 @@ struct CandidateRow: View {
                 HStack(spacing: 12) {
                     AsyncImage(url: URL(string: c.thumb)) { img in img.resizable().scaledToFill() } placeholder: { Rectangle().fill(Brand.raised) }
                         .frame(width: 48, height: 48)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                     VStack(alignment: .leading, spacing: 3) {
                         Text(c.title).font(.system(size: 15.5, weight: .medium)).foregroundColor(Brand.fg).lineLimit(1)
                         Text(busy ? "Lo prendo da YouTube…" : [c.channel, c.duration > 0 ? mmss(c.duration) : ""].filter { !$0.isEmpty }.joined(separator: " · "))
@@ -558,12 +586,16 @@ struct CandidateRow: View {
                 ProgressView().controlSize(.small).frame(width: 32)
             } else {
                 Button { take(play: false) } label: {
-                    Image(systemName: "plus.circle.fill").font(.system(size: 26)).foregroundColor(Brand.fg)
+                    Image(systemName: "plus")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundColor(Brand.fg)
+                        .frame(width: 32, height: 32)
+                        .background(Circle().fill(Brand.raised))
                 }
                 .buttonStyle(Press())
             }
         }
-        .padding(.vertical, 7)
+        .padding(.vertical, 6)
     }
 
     /// The PC fetches it into the library (some seconds); with `play` it starts right after.
@@ -586,9 +618,9 @@ struct SectionTitle: View {
     var trailing: String? = nil
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text(text).font(.system(size: 21, weight: .bold)).foregroundColor(Brand.fg)
+            Text(text).font(.system(size: 20, weight: .bold)).foregroundColor(Brand.fg)
             Spacer()
-            if let t = trailing { Text(t).font(.system(size: 13).monospacedDigit()).foregroundColor(Brand.faint) }
+            if let t = trailing { Text(t).font(.system(size: 13, weight: .medium).monospacedDigit()).foregroundColor(Brand.faint) }
         }
         .padding(.horizontal, 20)
         .padding(.bottom, 10)

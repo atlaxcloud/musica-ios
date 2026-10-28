@@ -5,6 +5,72 @@ import UIKit
 enum Haptic {
     static func tap() { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
     static func ok() { UINotificationFeedbackGenerator().notificationOccurred(.success) }
+    static func select() { UISelectionFeedbackGenerator().selectionChanged() }
+}
+
+/// Local search: every word typed must be in title, artist or album, ignoring case and accents.
+/// The folded text of each track is kept, so a keystroke over thousands of songs stays instant.
+enum Search {
+    private static var keys: [String: (sig: Int, key: String)] = [:]
+
+    static func fold(_ s: String) -> String {
+        s.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: nil)
+    }
+
+    private static func key(_ t: Track) -> String {
+        var h = Hasher()
+        h.combine(t.title)
+        h.combine(t.artist)
+        h.combine(t.album)
+        let sig = h.finalize()
+        if let k = keys[t.id], k.sig == sig { return k.key }
+        let k = fold(t.title + " " + t.artist + " " + t.album)
+        keys[t.id] = (sig, k)
+        return k
+    }
+
+    static func filter(_ ts: [Track], _ q: String) -> [Track] {
+        let words = fold(q).split(separator: " ").map(String.init)
+        if words.isEmpty { return ts }
+        return ts.filter { t in
+            let k = key(t)
+            return words.allSatisfy { k.contains($0) }
+        }
+    }
+}
+
+/// The one search field of the app: a soft capsule, the clear button when there is text.
+struct SearchField: View {
+    let prompt: String
+    @Binding var text: String
+    var focus: FocusState<Bool>.Binding
+    var onSubmit: () -> Void = {}
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(Brand.faint)
+            TextField("", text: $text, prompt: Text(prompt).foregroundColor(Brand.faint))
+                .focused(focus)
+                .submitLabel(.search)
+                .autocorrectionDisabled()
+                .textInputAutocapitalization(.never)
+                .onSubmit(onSubmit)
+            if !text.isEmpty {
+                Button { text = "" } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundColor(Brand.faint)
+                }
+                .buttonStyle(.plain)
+                .transition(.opacity)
+            }
+        }
+        .font(.system(size: 16))
+        .padding(.horizontal, 14)
+        .frame(height: 42)
+        .background(Capsule(style: .continuous).fill(Brand.raised))
+        .animation(.easeOut(duration: 0.15), value: text.isEmpty)
+    }
 }
 
 /// A track's cover: memory (read in the body, so a cached cover never flashes), then the phone
@@ -45,11 +111,13 @@ struct Pill: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .font(.system(size: 15, weight: .semibold))
-            .padding(.vertical, 11)
             .frame(maxWidth: .infinity)
+            .frame(height: 46)
             .foregroundColor(filled ? Brand.bg : Brand.fg)
-            .background(RoundedRectangle(cornerRadius: Brand.r.small, style: .continuous).fill(filled ? Brand.fg : Brand.raised))
-            .opacity(configuration.isPressed ? 0.7 : 1)
+            .background(Capsule(style: .continuous).fill(filled ? Brand.fg : Brand.raised))
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .opacity(configuration.isPressed ? 0.8 : 1)
+            .animation(.spring(response: 0.25, dampingFraction: 0.7), value: configuration.isPressed)
     }
 }
 
@@ -287,7 +355,7 @@ extension View {
     func row() -> some View {
         listRowBackground(Brand.bg)
             .listRowSeparatorTint(Brand.line)
-            .listRowInsets(EdgeInsets(top: 7, leading: 16, bottom: 7, trailing: 16))
+            .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 14))
     }
 
     func page() -> some View {
